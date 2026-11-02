@@ -34,8 +34,9 @@ python -m prosus_search search "pizza de queijo" --k 5
 
 On macOS/Linux activate with `source .venv/bin/activate`; use the same Python
 commands and copy the returned `build_manifest` path where needed. The lock file
-records the tested Windows/Python 3.12 environment; other binary platforms remain
-untested. Alternatively use `pip install -e '.[local,dev]'` and record resolved
+records the tested Windows/Python 3.12 environment. GitHub Actions also passes the
+offline fixture tests on Ubuntu; full-catalog timing was measured on Windows.
+Alternatively use `pip install -e '.[local,dev]'` and record resolved
 versions. Setup downloads approximately 490 MB. Subsequent local operation needs
 no internet or API key.
 
