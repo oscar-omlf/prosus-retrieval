@@ -4,5 +4,8 @@
 *.toml text eol=lf
 *.json text eol=lf
 *.md text eol=lf
+*.mjs text eol=lf
+*.yml text eol=lf
+results/*.csv whitespace=cr-at-eol
 AGENTS.md -text
 PROMPT.md -text
