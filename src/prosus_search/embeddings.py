@@ -142,7 +142,7 @@ class EmbeddingClient:
             raise EmbeddingError("Install the project's pinned OpenAI dependency before using hosted embeddings") from None
         # SDK import can enable debug logging through environment settings.
         # Never emit request bodies or headers from this application.
-        for logger in ("openai", "httpx", "httpcore"):
+        for logger in ("openai", "httpx", "httpcore", "httpx2", "httpcore2"):
             logging.getLogger(logger).setLevel(logging.WARNING)
         try:
             self._provider = OpenAI(api_key=key, max_retries=0, timeout=self.config.build_timeout)

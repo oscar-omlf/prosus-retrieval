@@ -283,7 +283,7 @@ class LocalEmbeddingClient:
             "model": MODEL_ID, "revision": self.revision, "backend": "onnxruntime-cpu-fp32",
             "kind": kind, "inputs": len(texts), "unique_inputs": 0, "cache_hits": 0,
             "computed_vectors": 0, "batches": 0, "input_tokens": 0, "api_requests": 0,
-            "api_cost_usd": 0, "elapsed_seconds": 0.0,
+            "api_cost_usd": 0, "bypass_cache": bypass_cache, "elapsed_seconds": 0.0,
         }
         if not texts:
             return np.empty((0, DIMENSIONS), dtype=np.float32)
@@ -315,11 +315,12 @@ class LocalEmbeddingClient:
             batch = missing[start:start + self.batch_size]
             vectors = self._infer([encoding for _, encoding in batch])
             for (key, _), vector in zip(batch, vectors):
-                self.store.put_embedding(key, vector, {
-                    "provider": "local", "model": MODEL_ID, "revision": self.revision,
-                    "model_fingerprint": self.manifest["model_fingerprint"], "kind": kind,
-                    "representation_version": representation_version, "created_at": utc_now(),
-                })
+                if not bypass_cache:
+                    self.store.put_embedding(key, vector, {
+                        "provider": "local", "model": MODEL_ID, "revision": self.revision,
+                        "model_fingerprint": self.manifest["model_fingerprint"], "kind": kind,
+                        "representation_version": representation_version, "created_at": utc_now(),
+                    })
                 found[key] = vector
             self.last_run["computed_vectors"] += len(batch)
             self.last_run["batches"] += 1
