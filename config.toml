@@ -1,0 +1,60 @@
+# No credentials belong in this file. Hosted calls require --allow-api.
+[paths]
+catalog = "5k_items_curated.csv"
+queries = "queries.csv"
+state = "work/state.sqlite3"
+artifacts = "work/artifacts"
+model_dir = "work/models/multilingual-e5-small"
+split = "protocols/split-v1.json"
+outputs = "outputs"
+tokenizer_cache = "work/tokenizers"
+
+[data]
+catalog_sha256 = "a371010a48e595e7acecf9fcbafc46fa8ca9de360a0fc4c51004fbf125c04568"
+queries_sha256 = "09dfe87757421eda46114c544df30419825327d71b979d5f74f8bf630597792a"
+
+[representation]
+version = "catalog-v1-portion"
+item_token_cap = 512
+query_token_cap = 128
+
+[retrieval]
+k1 = 1.5
+b = 0.75
+rrf_k = 60
+rrf_depth = 100
+
+[local]
+model = "intfloat/multilingual-e5-small"
+revision = "614241f622f53c4eeff9890bdc4f31cfecc418b3"
+dimensions = 384
+batch_size = 16
+threads = 6
+
+[models.small]
+model = "text-embedding-3-small"
+dimensions = 1536
+input_rate_per_million = "0.02"
+epoch = "v1"
+
+[models.large]
+model = "text-embedding-3-large"
+dimensions = 3072
+input_rate_per_million = "0.13"
+epoch = "v1"
+
+[budget]
+global_micro_usd = 4500000
+embeddings = 500000
+development = 1400000
+final = 850000
+round4 = 1000000
+recovery = 750000
+
+[evaluation]
+seed = 20261102
+bootstrap_replicates = 2000
+primary_model = "gpt-6-luna"
+secondary_model = "gpt-6-sol"
+input_token_cap = 3072
+output_token_cap = 512
