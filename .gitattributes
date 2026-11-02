@@ -1,8 +1,8 @@
 # Preserve exact assignment/input bytes and use portable LF for new source files.
-AGENTS.md -text
-PROMPT.md -text
 *.csv -text
 *.py text eol=lf
 *.toml text eol=lf
 *.json text eol=lf
 *.md text eol=lf
+AGENTS.md -text
+PROMPT.md -text

@@ -89,6 +89,11 @@ def load_config(path: str | Path = "config.toml") -> Config:
     lexical = values["retrieval"]
     if not 0 < lexical["k1"] < 100 or not 0 <= lexical["b"] <= 1:
         raise ConfigError("BM25 requires positive k1 and b in [0,1]")
+    local = values["local"]
+    if local["model"] != "intfloat/multilingual-e5-small" or local["dimensions"] != 384:
+        raise ConfigError("Local adapter requires intfloat/multilingual-e5-small with 384 dimensions")
+    if not isinstance(local["revision"], str) or not re.fullmatch(r"[0-9a-f]{40}", local["revision"]):
+        raise ConfigError("Local revision must be a pinned 40-character commit")
     budget = values["budget"]
     if budget["global_micro_usd"] > 4_500_000:
         raise ConfigError("The untouched $0.50 reserve cannot be allocated")
