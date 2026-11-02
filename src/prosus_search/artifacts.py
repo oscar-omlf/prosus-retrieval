@@ -8,7 +8,7 @@ from importlib.metadata import PackageNotFoundError, version
 import json
 import os
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping
 import uuid
 
 import numpy as np

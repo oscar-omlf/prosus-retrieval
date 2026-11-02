@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import logging
 import os
 import time
 from typing import Any, Callable, Sequence
 
 import numpy as np
 
-from .store import Store, StoreError, canonical_json, content_hash, cost_micro_usd, utc_now
+from .store import Store, content_hash, cost_micro_usd, utc_now
 
 
 class EmbeddingError(RuntimeError):
@@ -139,7 +140,14 @@ class EmbeddingClient:
             from openai import OpenAI
         except ImportError:
             raise EmbeddingError("Install the project's pinned OpenAI dependency before using hosted embeddings") from None
-        self._provider = OpenAI(api_key=key, max_retries=0, timeout=self.config.build_timeout)
+        # SDK import can enable debug logging through environment settings.
+        # Never emit request bodies or headers from this application.
+        for logger in ("openai", "httpx", "httpcore"):
+            logging.getLogger(logger).setLevel(logging.WARNING)
+        try:
+            self._provider = OpenAI(api_key=key, max_retries=0, timeout=self.config.build_timeout)
+        except Exception:
+            raise EmbeddingError("Cannot initialize the OpenAI client; check the installed SDK and environment configuration") from None
         return self._provider
 
     def _request(self, provider: Any, texts: Sequence[str], interactive: bool) -> Any:
