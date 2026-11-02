@@ -218,3 +218,18 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Assignment inputs and private execution artifacts (redistribution unconfirmed)
+/5k_items_curated*.csv
+/queries*.csv
+/work/
+/outputs/
+*.sqlite3
+*.sqlite3-*
+*.npy
+*.onnx
+*.safetensors
+.env.*
+!.env.example
+/.storage-smoke-*/
+/.test-tmp/
