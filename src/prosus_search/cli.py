@@ -31,7 +31,7 @@ def parser() -> argparse.ArgumentParser:
     query = commands.add_parser("search", help="return the top k items for a new natural-language query")
     query.add_argument("query")
     query.add_argument("--k", type=int, default=5)
-    query.add_argument("--mode", choices=("lexical", "semantic-local", "hybrid-local", "grounded-local", "grounded-rerank", "grounded-facets", "constraint-hybrid", "semantic-small", "hybrid-small", "semantic-large", "hybrid-large"))
+    query.add_argument("--mode", choices=("lexical", "semantic-local", "hybrid-local", "grounded-local", "grounded-rerank", "grounded-facets", "constraint-hybrid", "contextual", "semantic-small", "hybrid-small", "semantic-large", "hybrid-large"))
     query.add_argument("--release", help="explicit release ID instead of current pointer")
     query.add_argument("--allow-api", action="store_true")
     query.add_argument("--json", action="store_true", help="include IDs, scores, source excerpts and timings")
@@ -52,9 +52,10 @@ def parser() -> argparse.ArgumentParser:
     export.add_argument("--output", required=True)
     export.add_argument("--run", help="one run only; omit to export all")
     commands.add_parser("budget", help="show persistent confirmed/pending/uncertain spending")
-    serve = commands.add_parser("serve", help="run a localhost-only JSON demo with remote API disabled")
+    serve = commands.add_parser("serve", help="localhost JSON demo; offline by default, contextual API requires opt-in")
     serve.add_argument("--port", type=int, default=8765)
-    serve.add_argument("--mode", choices=("constraint-hybrid", "semantic-local", "grounded-local", "grounded-facets"), default="constraint-hybrid")
+    serve.add_argument("--mode", choices=("constraint-hybrid", "semantic-local", "grounded-local", "grounded-facets", "contextual"), default="constraint-hybrid")
+    serve.add_argument("--allow-api", action="store_true", help="allow budgeted official API calls only for contextual mode")
     return result
 
 
@@ -138,7 +139,12 @@ def main(argv=None) -> int:
             _emit({"output_directory": result["output_directory"], "runs": result["report"]["runs"],
                    "queries": result["report"]["query_count"], "rows": result["report"]["ranking_rows"]})
         elif args.command == "search":
-            service = SearchService(config, mode=args.mode, release_id=args.release, allow_api=args.allow_api)
+            if args.mode == 'contextual':
+                from .quality import QualitySearch
+                if args.release:raise ValueError('Contextual mode derives its release from the frozen source and quality policy')
+                service=QualitySearch(config,allow_api=args.allow_api)
+            else:
+                service = SearchService(config, mode=args.mode, release_id=args.release, allow_api=args.allow_api)
             result = service.search(args.query, args.k)
             if args.json:
                 _emit(result)
@@ -160,7 +166,7 @@ def main(argv=None) -> int:
             _emit(open_store(config).summary())
         elif args.command == "serve":
             from .server import serve
-            serve(config, port=args.port, mode=args.mode)
+            serve(config, port=args.port, mode=args.mode,allow_api=args.allow_api)
         return 0
     except (ValueError, RuntimeError, OSError) as exc:
         # Providers sanitize exceptions at their boundary; never print SDK objects.

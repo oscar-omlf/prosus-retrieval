@@ -1,4 +1,4 @@
-"""Small localhost-only JSON demo; one reused search runtime, no remote calls."""
+"""Localhost JSON demo; reused runtime, with explicit budgeted quality API opt-in."""
 from __future__ import annotations
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -8,8 +8,13 @@ from urllib.parse import parse_qs, urlparse
 from .service import SearchService, SearchBusyError
 
 
-def serve(config='config.toml', *, port=8765, mode='constraint-hybrid'):
-    service = SearchService(config, mode=mode, allow_api=False)
+def serve(config='config.toml', *, port=8765, mode='constraint-hybrid', allow_api=False):
+    if allow_api and mode!='contextual':raise ValueError('Server API opt-in is supported only for contextual quality mode')
+    if mode=='contextual':
+        from .quality import QualitySearch
+        service=QualitySearch(config,allow_api=allow_api)
+    else:
+        service = SearchService(config, mode=mode, allow_api=False)
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_):
@@ -28,7 +33,7 @@ def serve(config='config.toml', *, port=8765, mode='constraint-hybrid'):
             route = urlparse(self.path)
             if route.path in {'/', '/health'}:
                 self.respond(200, {'status': 'ready', 'mode': mode, 'release_id': service.release_id,
-                    'remote_api_enabled': False, 'usage': '/search?q=hamburguer%20sem%20queijo&k=5'})
+                    'remote_api_enabled': allow_api, 'usage': '/search?q=hamburguer%20sem%20queijo&k=5'})
                 return
             if route.path != '/search':
                 self.respond(404, {'error': 'Unknown route'})
@@ -43,10 +48,10 @@ def serve(config='config.toml', *, port=8765, mode='constraint-hybrid'):
             except SearchBusyError:
                 self.respond(429, {'error': 'Search busy; retry later'})
             except (ValueError, RuntimeError) as exc:
-                self.respond(400, {'error': str(exc), 'remote_api_enabled': False})
+                self.respond(400, {'error': str(exc), 'remote_api_enabled': allow_api})
 
     server = ThreadingHTTPServer(('127.0.0.1', port), Handler)
-    print(f'Listening on http://127.0.0.1:{port} | {mode} | API disabled', flush=True)
+    print(f'Listening on http://127.0.0.1:{port} | {mode} | API {"enabled with ledger ceiling" if allow_api else "disabled"}', flush=True)
     try:
         server.serve_forever()
     finally:
