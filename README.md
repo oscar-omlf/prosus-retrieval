@@ -4,6 +4,13 @@ Type a Portuguese query and choose how many results to return. The system embeds
 the query, scores all **4,997 distinct catalog items**, and returns the top `k`.
 Product vectors are prepared once. Search never calls a relevance judge.
 
+The latest [architecture reassessment](review/REASSESSMENT.md) compares field
+lexical retrieval, a lean hybrid and contextual shortlist ranking against the
+constraint-aware control. Reranking helped development queries, but its gain on
+12 fresh synthetic queries was uncertain and added latency. It remains a research
+experiment; no default or serving release changed. The cumulative ledger now
+stands at **$2.504944 / $4.50**; amounts in earlier experiment sections are snapshots.
+
 `--mode constraint-hybrid` adds explicit ingredient-contradiction filtering before
 hybrid candidate selection. Unspecified ingredients remain eligible. Supported
 absence gives a bounded ranking advantage; optional toppings and historical
