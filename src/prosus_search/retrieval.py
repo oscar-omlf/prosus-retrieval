@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+from threading import Lock
 from typing import Sequence
 
 import numpy as np
@@ -71,6 +72,22 @@ def stable_rank(ids: Sequence[str], scores: Sequence[float] | np.ndarray, k: int
     if k > len(ids):
         raise RetrievalError(f"k={k} exceeds catalog size {len(ids)}")
     return np.lexsort((np.asarray(ids, dtype=str), -array))[:k]
+
+
+def _topk_canonical(scores: np.ndarray, k: int) -> np.ndarray:
+    """Exact top-k for already validated, canonically ID-sorted engine rows.
+
+    Partition only finds a score boundary. Include strictly better rows and the
+    first IDs tied at that boundary, then stably sort the small selected set.
+    Unlike a bare argpartition, this preserves deterministic ties at k.
+    """
+    if k == len(scores):
+        return np.argsort(-scores, kind="stable")
+    boundary = np.partition(scores, len(scores) - k)[len(scores) - k]
+    better = np.flatnonzero(scores > boundary)
+    tied = np.flatnonzero(scores == boundary)[:k - len(better)]
+    candidates = np.concatenate((better, tied))
+    return candidates[np.lexsort((candidates, -scores[candidates]))]
 
 
 def normalize_vectors(vectors: np.ndarray | Sequence, expected_dimensions: int | None = None) -> np.ndarray:
@@ -176,17 +193,6 @@ class LexicalIndex:
         return scores
 
 
-def _ranks(ids: Sequence[str], scores: np.ndarray, *, positive_only: bool = False, depth: int | None = None) -> np.ndarray:
-    order = stable_rank(ids, scores)
-    if positive_only:
-        order = order[scores[order] > 0]
-    if depth is not None:
-        order = order[:depth]
-    ranks = np.zeros(len(ids), dtype=np.int32)
-    ranks[order] = np.arange(1, len(order) + 1)
-    return ranks
-
-
 class SearchEngine:
     """Loaded in-memory catalog; lexical index is created only when requested."""
 
@@ -214,8 +220,19 @@ class SearchEngine:
             self.vectors = matrix
         self.k1, self.b, self.rrf_k, self.rrf_depth = k1, b, rrf_k, rrf_depth
         self._lexical: LexicalIndex | None = None
+        self._lexical_lock = Lock()
 
-    def score(self, query: str, query_vector: np.ndarray | None = None, mode: str = "semantic") -> ScoreBundle:
+    def _ranks(self, scores: np.ndarray, *, depth: int | None = None,
+               positive_only: bool = False) -> np.ndarray:
+        order = _topk_canonical(scores, min(depth or len(self.ids), len(self.ids)))
+        if positive_only:
+            order = order[scores[order] > 0]
+        ranks = np.zeros(len(self.ids), dtype=np.int32)
+        ranks[order] = np.arange(1, len(order) + 1)
+        return ranks
+
+    def score(self, query: str, query_vector: np.ndarray | None = None, mode: str = "semantic",
+              *, include_ranks: bool = True) -> ScoreBundle:
         if mode not in {"semantic", "lexical", "hybrid"}:
             raise RetrievalError(f"unsupported retrieval mode {mode!r}")
         if not normalize_text(query):
@@ -227,17 +244,25 @@ class SearchEngine:
             dense = dense_scores(self.vectors, query_vector)
         if mode in {"lexical", "hybrid"}:
             if self._lexical is None:
-                self._lexical = LexicalIndex([item.lexical_tokens for item in self.prepared.items], k1=self.k1, b=self.b)
+                with self._lexical_lock:
+                    if self._lexical is None:
+                        self._lexical = LexicalIndex([item.lexical_tokens for item in self.prepared.items], k1=self.k1, b=self.b)
             lexical = self._lexical.score(query)
         if mode == "semantic":
-            return ScoreBundle(dense, "cosine", dense_scores=dense, dense_ranks=_ranks(self.ids, dense), candidate_count=len(self.ids))
+            return ScoreBundle(dense, "cosine", dense_scores=dense,
+                               dense_ranks=self._ranks(dense) if include_ranks else None, candidate_count=len(self.ids))
         if mode == "lexical":
-            return ScoreBundle(lexical, "bm25_lucene", lexical_scores=lexical, lexical_ranks=_ranks(self.ids, lexical), candidate_count=len(self.ids))
-        scores = rrf_scores(self.ids, dense, lexical, rank_constant=self.rrf_k, depth=self.rrf_depth)
+            return ScoreBundle(lexical, "bm25_lucene", lexical_scores=lexical,
+                               lexical_ranks=self._ranks(lexical) if include_ranks else None, candidate_count=len(self.ids))
+        dense_ranks = self._ranks(dense, depth=self.rrf_depth)
+        lexical_ranks = self._ranks(lexical, positive_only=True, depth=self.rrf_depth)
+        scores = np.zeros(len(self.ids), dtype=np.float64)
+        for ranks in (dense_ranks, lexical_ranks):
+            present = ranks > 0
+            scores[present] += 1.0 / (self.rrf_k + ranks[present].astype(np.float64))
         return ScoreBundle(
             scores, "rrf", dense, lexical,
-            _ranks(self.ids, dense, depth=self.rrf_depth),
-            _ranks(self.ids, lexical, positive_only=True, depth=self.rrf_depth),
+            dense_ranks, lexical_ranks,
             int(np.count_nonzero(scores)),
         )
 
@@ -247,15 +272,19 @@ class SearchEngine:
         _positive_integer(k, "k")
         if k > len(self.ids):
             raise RetrievalError(f"k={k} exceeds catalog size {len(self.ids)}")
-        bundle = self.score(query, query_vector, mode)
+        bundle = self.score(query, query_vector, mode, include_ranks=False)
         if k > bundle.candidate_count:
             raise RetrievalError(f"k={k} exceeds {bundle.candidate_count} candidates at fixed RRF depth {self.rrf_depth}")
-        order = stable_rank(self.ids, bundle.scores, k)
+        order = _topk_canonical(bundle.scores, k)
         results = []
         for rank, index in enumerate(order, start=1):
             record = self.prepared.items[index].record
             dense_rank = None if bundle.dense_ranks is None else int(bundle.dense_ranks[index]) or None
             lexical_rank = None if bundle.lexical_ranks is None else int(bundle.lexical_ranks[index]) or None
+            if mode == "semantic":
+                dense_rank = rank
+            elif mode == "lexical":
+                lexical_rank = rank
             results.append(RankedItem(
                 record.item_id, record.merchant_id, rank, float(bundle.scores[index]), bundle.score_kind,
                 record.metadata["name"], record.metadata.get("description", ""),
