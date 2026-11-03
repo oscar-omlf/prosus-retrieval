@@ -165,7 +165,9 @@ def compatibility(plan, facts):
 
 
 class GroundedSearch:
-    def __init__(self, config, baseline_release_id=None, *, allow_api=False, rerank=False):
+    def __init__(self, config, baseline_release_id=None, *, allow_api=False, rerank=False, facets=False):
+        if rerank and facets:
+            raise ValueError('Select either source reranking or facet matching')
         self.config = config
         baseline_release_id = baseline_release_id or load_current(config.resolve('artifacts'))['models']['semantic-local']
         anchor = load_release(config.resolve('artifacts'), baseline_release_id,
@@ -176,6 +178,10 @@ class GroundedSearch:
         self.records = tuple(replace(r, metadata=freeze_json(r.metadata), historical_options=freeze_json(r.historical_options)) for r in catalog.records)
         self.ids = anchor.ids
         self.facts = tuple(product(record) for record in self.records)
+        self.facet_facts = None
+        if facets:
+            from .facets import product_facets
+            self.facet_facts = tuple(product_facets(r) for r in self.records)
         self.vocabulary = frozenset().union(*(set(f['type_keys']) | set(f['name_keys']) for f in self.facts))
         from .understanding import SemanticInterpreter
         self.interpreter = SemanticInterpreter(config,allow_api=allow_api)
@@ -183,7 +189,7 @@ class GroundedSearch:
         if rerank:
             from .reranking import EvidenceReranker
             self.reranker = EvidenceReranker(config,allow_api=allow_api)
-        self.mode = 'grounded-rerank' if rerank else 'grounded-local'
+        self.mode = 'grounded-facets' if facets else 'grounded-rerank' if rerank else 'grounded-local'
         self.client = local_client(config, open_store(config))
         texts = [f['text'] for f in self.facts]
         self.identity = {'version': VERSION, 'source_hash': catalog.source_hash, 'anchor': baseline_release_id,
@@ -192,6 +198,9 @@ class GroundedSearch:
         self.identity['query_interpreter_fingerprint']=self.interpreter.fingerprint
         if self.reranker is not None:
             self.identity['reranker_fingerprint']=self.reranker.fingerprint
+        if facets:
+            from . import facets as facet_module
+            self.identity['facet_matcher_sha256']=file_hash(facet_module.__file__)
         self.release_id = canonical_hash(self.identity)
         matrix_identity = {'representation_hash': self.identity['representation_hash'],
                            'model_fingerprint': self.identity['model_fingerprint']}
@@ -236,6 +245,8 @@ class GroundedSearch:
         plan = {'original':query, 'identity_phrase':raw_plan['identity'], 'identity_keys':identity['identity_keys'],
                 **{key:raw_plan[key] for key in ('canonical','domain','requirements','preferences','ambiguity','alternatives')},
                 'interpreter':'query-only LLM; cached budgeted structured output; no evaluation inputs'}
+        if self.facet_facts is not None:
+            plan['identity_keys']=sorted(keys(plan['identity_phrase']))
         vectors = self.client.embed([plan['original'], plan['canonical']], representation_version=VERSION + '-query', kind='query', bypass_cache=bypass_query_cache)
         dense = self.vectors @ normalize_vectors(vectors).T
         lexical = self.lexical.score(plan['original'])
@@ -249,14 +260,18 @@ class GroundedSearch:
         candidates = np.flatnonzero(retrieval > 0)
         values, explanations = [], {}
         for i in candidates:
-            adjustment, explanations[i] = compatibility(plan, self.facts[i])
+            if self.facet_facts is not None:
+                from .facets import compatibility as facet_compatibility
+                adjustment, explanations[i] = facet_compatibility(plan,self.facet_facts[i],self.facts[i])
+            else:
+                adjustment, explanations[i] = compatibility(plan, self.facts[i])
             values.append(retrieval[i] / 3. + adjustment)
         order = stable_rank([self.ids[i] for i in candidates], np.asarray(values), min(10 if self.reranker is not None else k, len(candidates)))
         results = []
         for rank, offset in enumerate(order, 1):
             i = candidates[offset]
             results.append({'item_id': self.ids[i], 'merchant_id': self.records[i].merchant_id, 'rank': rank,
-                'score': float(values[offset]), 'score_kind': VERSION, 'name': self.records[i].metadata['name'],
+                'score': float(values[offset]), 'score_kind': self.mode if self.facet_facts is not None else VERSION, 'name': self.records[i].metadata['name'],
                 'description': self.records[i].metadata.get('description', ''), 'explanation': explanations[i]})
         reranking = None
         if self.reranker is not None:

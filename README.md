@@ -17,6 +17,21 @@ later constructions validate and reuse that matrix. This mode does not change
 the incumbent or current-release pointer. Detailed results and limitations are
 recorded in [the completed semantic evaluation](review/GROUNDED-SEMANTIC.md).
 
+`--mode grounded-facets` selects an additional experimental source-facet matcher
+over the same E5-small candidate pool. It preserves multiword identity modifiers,
+exact source evidence, component scope, unknowns and conflicts; compatibility
+tiers precede retrieval similarity. It still uses the existing query interpreter:
+cached plans work offline, while unseen queries require `--allow-api`. It does
+not use the remote reranker. The first complete 30-query development comparison
+was weaker than grounded-local (nDCG .674 versus .731 on the same fully judged
+522-pair pool), so neither the incumbent nor the default was changed. See
+[the initial measured experiment](review/evidence/facets-v1.json).
+
+```powershell
+python scripts/score_grounded.py --facets
+python scripts/complete_grounded.py --folder work/grounded-facets
+```
+
 **Working now:** offline multilingual E5, BM25 and their RRF combination;
 100 queries × five results × three local runs. The independent review implements
 a hosted-small comparison option and runs blinded evaluation through the assignment gateway;
