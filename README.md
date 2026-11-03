@@ -24,6 +24,16 @@ uncached complex requests return an explicit error. CLI remote interpretation
 requires `--allow-api` and the existing cumulative budget ledger.
 See [the acceptance and evaluation protocol](review/CONSTRAINT-SEARCH.md).
 
+Constraint-hybrid status (2026-11-04): [all 500 predictions](review/evidence/constraint-top5-100.csv)
+are exported and 91 focused tests pass. The complete 578-pair development pool
+gives nDCG@5 .644 versus .660 for grounded-local; no reliable gain is established.
+Fresh judging has 175/274 pairs completed, with 99 primary judgments and 20
+independent checks remaining. Two inference attempts returned HTTP403, including
+the user-authorized retry; no full held-out metric is claimed. Conservative
+cumulative API spend is $1.688449 of the unchanged $4.50 ceiling. See the linked
+report for protocol amendments, limitations, receipts and reproducible commands.
+Historical experiment sections below retain their original accounting snapshots.
+
 An experimental grounded method is explicitly selectable with
 `python -m prosus_search search "hambúrguer sem queijo para viagem" --mode grounded-local --allow-api --json`.
 It retains E5-small, builds separate source-backed product text, retrieves dense
