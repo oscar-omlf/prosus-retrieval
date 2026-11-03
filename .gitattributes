@@ -21,3 +21,4 @@ review/evidence/relevance-v2-summary-*.json -text whitespace=cr-at-eol
 review/evidence/e5-base-v2/** -text whitespace=cr-at-eol
 review/evidence/reranker-v2/** -text whitespace=cr-at-eol
 review/evidence/intent-v5/** -text whitespace=cr-at-eol
+review/INTENT-JUDGING-v5.txt text eol=lf
