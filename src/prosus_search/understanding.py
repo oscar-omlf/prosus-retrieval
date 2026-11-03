@@ -65,7 +65,8 @@ def validate(value, query):
 
 class SemanticInterpreter:
     def __init__(self,config,*,allow_api=False):
-        self.client=JudgeClient(open_store(config),config=JudgeConfig(
+        factory = JudgeConfig.gpt41 if config['evaluation']['primary_model'].removeprefix('openai/').startswith('gpt-4.1') else JudgeConfig
+        self.client=JudgeClient(open_store(config),config=factory(
             model=config['evaluation']['primary_model'],base_url=config['api']['base_url'],
             timeout_seconds=30,protocol_version='grounded-query-semantic-v1'),
             allow_api=allow_api,token_counter=token_counter(config),max_attempts=1)

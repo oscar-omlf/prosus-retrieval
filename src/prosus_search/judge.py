@@ -130,6 +130,17 @@ class JudgeConfig:
     def secondary(cls) -> "JudgeConfig":
         return cls(model="gpt-6-sol", input_micro_usd_per_token="2.50", output_micro_usd_per_token="10")
 
+    @classmethod
+    def gpt41(cls, model: str, **kwargs) -> "JudgeConfig":
+        rates = {'openai/gpt-4.1-nano': ('0.10','0.40'),
+                 'openai/gpt-4.1-mini': ('0.40','1.60'),
+                 'openai/gpt-4.1': ('2','8')}
+        if model not in rates:
+            raise ValueError('This execution permits only the user-authorized GPT-4.1 models')
+        inp, out = rates[model]
+        kwargs['protocol_version']=kwargs.get('protocol_version',PROTOCOL_VERSION)+'-chat-configured-base-v2'
+        return cls(model=model,input_micro_usd_per_token=inp,output_micro_usd_per_token=out,**kwargs)
+
     def cost(self, input_tokens: int, output_tokens: int) -> int:
         if input_tokens < 0 or output_tokens < 0:
             raise ValueError("Token counts cannot be negative")
@@ -293,11 +304,14 @@ def make_judgment_payload(assessment_id: str, query: str, card: Mapping[str, Any
 
 
 def _payload(config: JudgeConfig, instructions: str, data: dict, schema: dict, name: str) -> dict:
-    return {"model": config.model, "instructions": instructions,
+    payload = {"model": config.model, "instructions": instructions,
             "input": [{"role": "user", "content": [{"type": "input_text", "text": json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)}]}],
             "text": {"format": {"type": "json_schema", "name": name, "strict": True, "schema": schema}},
             "reasoning": {"effort": "none"}, "max_output_tokens": config.output_token_cap,
             "store": False, "service_tier": "default"}
+    if config.model.removeprefix('openai/').startswith('gpt-4.1'):
+        payload.pop('reasoning')  # non-reasoning models do not accept reasoning.effort
+    return payload
 
 
 def _get(value: Any, key: str, default: Any = None) -> Any:
@@ -411,7 +425,24 @@ class JudgeClient:
     def _request(self, payload: dict) -> Any:
         with self._provider_lock:
             self._initialize_provider()
-        return self.provider(payload) if callable(self.provider) else self.provider.responses.create(**payload)
+        if callable(self.provider):
+            return self.provider(payload)
+        if self.config.model.removeprefix('openai/').startswith('gpt-4.1'):
+            # The assignment gateway exposes these supplied models through the
+            # OpenAI-compatible chat/completions endpoint. Keep the response
+            # adapter separate from source/schema validation and ledger handling.
+            provider=self.provider
+            response=provider.chat.completions.create(model=payload['model'],
+                messages=[{'role':'system','content':payload['instructions']},
+                          {'role':'user','content':payload['input'][0]['content'][0]['text']}],
+                response_format={'type':'json_schema','json_schema':{k:v for k,v in payload['text']['format'].items() if k!='type'}},
+                max_tokens=payload['max_output_tokens'],store=False)
+            choice=response.choices[0]
+            return {'id':response.id,'model':response.model,
+                'status':'completed' if choice.finish_reason=='stop' else 'incomplete',
+                'output_text':choice.message.content,
+                'usage':{'input_tokens':response.usage.prompt_tokens,'output_tokens':response.usage.completion_tokens}}
+        return self.provider.responses.create(**payload)
 
     def _initialize_provider(self) -> None:
         if self.provider is None:
@@ -473,9 +504,14 @@ class JudgeClient:
                     self.store.mark_uncertain(charge_id)
                     reason, retry_allowed, delay = _safe_error(exc)
                     status_code = getattr(exc, "status_code", None)
+                    body=getattr(exc,'body',{})
+                    # Fixed diagnostic categories only, never provider text.
+                    message=str(body.get('message',body.get('error',{})) if isinstance(body,dict) else '').lower()
+                    signals=[s for s in ('model','deployment','route','permission','not found','not_found','resource','api version') if s in message]
                     attempt.update(state="uncertain", elapsed_seconds=time.perf_counter() - started, error_code=reason,
                                    http_status=status_code if type(status_code) is int else None,
                                    error_type=type(exc).__name__)
+                    attempt['error_message_signals']=signals
                     record.update(reason=reason, retry_allowed=retry_allowed)
                     self.store.put(key, record)
                     if retry_allowed and len(record["attempts"]) < self.max_attempts:

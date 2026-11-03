@@ -57,7 +57,7 @@ recovery = 750000
 [evaluation]
 seed = 20261102
 bootstrap_replicates = 2000
-primary_model = "openai/gpt-6-luna"
-secondary_model = "openai/gpt-6-sol"
+primary_model = "openai/gpt-4.1-mini"
+secondary_model = "openai/gpt-4.1"
 input_token_cap = 3072
 output_token_cap = 1024
