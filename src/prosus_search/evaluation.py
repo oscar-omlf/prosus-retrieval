@@ -16,6 +16,8 @@ import numpy as np
 
 SEED = 20261102
 INITIAL_RUNS = ("lexical", "semantic-small", "semantic-large", "hybrid-small", "hybrid-large")
+LOCAL_RUNS = ("lexical", "semantic-local", "hybrid-local")
+REVIEW_RUNS = (*LOCAL_RUNS, "semantic-small", "hybrid-small")
 GAINS = (0, 1, 3, 7)
 
 
@@ -146,7 +148,9 @@ def _aggregate(per_query: Mapping[str, Mapping[str, Any]], query_ids: Sequence[s
     denom = sum(row["constraint_denominator"] for row in rows)
     contradicted = sum(row["contradiction_count"] for row in rows)
     unknown = sum(row["unknown_count"] for row in rows)
-    return {"query_count": len(rows), "ndcg_at_5": _mean([row["ndcg_at_5"] for row in rows]),
+    defined_ndcg = [row["ndcg_at_5"] for row in rows if row["ndcg_at_5"] is not None]
+    return {"query_count": len(rows), "ndcg_at_5": _mean(defined_ndcg),
+            "ndcg_query_count": len(defined_ndcg),
             "success_at_5": _mean([row["success_at_5"] for row in rows]),
             "mrr_at_5": _mean([row["mrr_at_5"] for row in rows]),
             "contradiction_count": contradicted, "unknown_count": unknown,
@@ -211,7 +215,7 @@ def evaluate_runs(rankings: Sequence[Mapping[str, Any]], pool: Mapping[str, Any]
             if any(set(status) != {req["id"] for req in card["requirements"]} for status in statuses):
                 raise EvaluationError("Judgment requirement IDs do not match the supplied intent card")
             per_query[qid] = {
-                "ndcg_at_5": dcg / idcg if idcg else 0.0,
+                "ndcg_at_5": dcg / idcg if idcg else None,
                 "success_at_5": int(bool(useful_ranks)),
                 "mrr_at_5": 1 / useful_ranks[0] if useful_ranks else 0.0,
                 "zero_idcg": idcg == 0,
@@ -224,12 +228,26 @@ def evaluate_runs(rankings: Sequence[Mapping[str, Any]], pool: Mapping[str, Any]
                                    "common_complete_subset": subset, "per_query": per_query}
     if complete:
         groups = groups or {qid: qid for qid in complete}
+        for run in runs:
+            intervals = {}
+            for metric in ("ndcg_at_5", "success_at_5", "mrr_at_5"):
+                values = {qid: result["systems"][run]["per_query"][qid][metric] for qid in complete
+                          if result["systems"][run]["per_query"][qid][metric] is not None}
+                interval = paired_group_bootstrap(values, groups, replicates=bootstrap_replicates, seed=seed) if values else None
+                intervals[metric] = None if interval is None else {"ci95": interval["ci95"],
+                    "query_count": interval["query_count"], "group_count": interval["group_count"],
+                    "interpretation": "Group bootstrap conditional on automated labels; not judge accuracy."}
+            result["systems"][run]["common_complete_subset_intervals"] = intervals
         for i, incumbent in enumerate(runs):
             for candidate in runs[i + 1:]:
                 values = {qid: result["systems"][candidate]["per_query"][qid]["ndcg_at_5"]
-                          - result["systems"][incumbent]["per_query"][qid]["ndcg_at_5"] for qid in complete}
-                result["comparisons"][f"{candidate} - {incumbent}"] = paired_group_bootstrap(
-                    values, groups, replicates=bootstrap_replicates, seed=seed)
+                          - result["systems"][incumbent]["per_query"][qid]["ndcg_at_5"] for qid in complete
+                          if result["systems"][candidate]["per_query"][qid]["ndcg_at_5"] is not None}
+                result["comparisons"][f"{candidate} - {incumbent}"] = (paired_group_bootstrap(
+                    values, groups, replicates=bootstrap_replicates, seed=seed) if values else None)
+    result["metric_conventions"] = {"zero_idcg": "nDCG undefined; excluded only from nDCG with denominator shown",
+        "success_and_mrr": "all completely judged queries, including pools with no useful product",
+        "relevant_threshold": 2, "gains": list(GAINS)}
     return result
 
 
@@ -272,8 +290,14 @@ def compare_sensitivity(primary: Mapping[str, Any], alternate: Mapping[str, Any]
     runs = sorted(primary["systems"])
     for index, a in enumerate(runs):
         for b in runs[index + 1:]:
-            p = primary["systems"][b]["full_split"]["ndcg_at_5"] - primary["systems"][a]["full_split"]["ndcg_at_5"]
-            alt = alternate["systems"][b]["full_split"]["ndcg_at_5"] - alternate["systems"][a]["full_split"]["ndcg_at_5"]
+            defined = [{qid for qid, value in source["systems"][a]["per_query"].items()
+                        if value["ndcg_at_5"] is not None} for source in (primary, alternate)]
+            metrics = [source["systems"][run]["full_split"]["ndcg_at_5"] for source in (primary, alternate) for run in (b, a)]
+            if any(value is None for value in metrics) or defined[0] != defined[1]:
+                report["comparisons"][f"{b} - {a}"] = {"primary_delta": None, "alternate_delta": None,
+                    "delta_swing": None, "material_instability": True, "reason": "undefined_or_different_nDCG_coverage"}
+                continue
+            p, alt = metrics[0] - metrics[1], metrics[2] - metrics[3]
             report["comparisons"][f"{b} - {a}"] = {"primary_delta": p, "alternate_delta": alt,
                 "delta_swing": abs(p - alt), "material_instability": p * alt < 0 and abs(p - alt) >= 0.02}
     if primary_judgments is not None and alternate_judgments is not None:
@@ -319,7 +343,10 @@ def select_configuration(report: Mapping[str, Any], checks: Mapping[str, Mapping
                          hybrid_incumbent: str = "hybrid-small") -> dict:
     """Apply the frozen initial comparison policy; do not infer missing checks."""
     required_checks = {"repeat", "prompt", "model", "intent_card"}
-    required_runs = set(INITIAL_RUNS)
+    present = set(report.get("systems", {}))
+    local_comparison = present == set(LOCAL_RUNS)
+    mixed_comparison = present == set(REVIEW_RUNS)
+    required_runs = set(REVIEW_RUNS if mixed_comparison else LOCAL_RUNS if local_comparison else INITIAL_RUNS)
     selection = {"serving": incumbent, "semantic_finalist": semantic_incumbent,
                  "hybrid_finalist": hybrid_incumbent, "promoted": False,
                  "origin": "llm", "calibration_status": "not_performed", "reasons": [],
@@ -329,6 +356,14 @@ def select_configuration(report: Mapping[str, Any], checks: Mapping[str, Mapping
         return selection
     if not required_checks <= set(checks) or not all(checks[name].get("complete") for name in required_checks):
         selection["reasons"].append("Required sensitivity checks incomplete; retain the previously accepted incumbent.")
+        return selection
+    agreement = checks["model"].get("agreement") or {}
+    flip_rate = agreement.get("useful_threshold_flip_rate")
+    if not agreement.get("pair_count") or flip_rate is None or flip_rate > .10:
+        selection["reasons"].append("Independent binary relevance agreement is missing or below the fixed 90% target; no promotion.")
+        return selection
+    if any(report["systems"][run]["full_split"]["ndcg_at_5"] is None for run in required_runs):
+        selection["reasons"].append("No positive ideal gain in the pool; nDCG is undefined, so selection remains unverified.")
         return selection
 
     def stable(a: str, b: str) -> bool:
@@ -346,12 +381,14 @@ def select_configuration(report: Mapping[str, Any], checks: Mapping[str, Mapping
     def eligible(a: str, b: str) -> bool:
         return stable(a, b) and no_contradiction_regression(a, b)
 
-    for family, current in (("semantic", semantic_incumbent), ("hybrid", hybrid_incumbent)):
-        challenger = f"{family}-large" if current.endswith("small") else f"{family}-small"
-        if eligible(challenger, current) and _comparison(report, challenger, current)["ci95"][0] > 0:
+    families = ("local", "small") if mixed_comparison else ("small", "large")
+    for family, current in (() if local_comparison else (("semantic", semantic_incumbent), ("hybrid", hybrid_incumbent))):
+        challenger = f"{family}-" + next(size for size in families if not current.endswith(size))
+        gain = _comparison(report, challenger, current)
+        if eligible(challenger, current) and gain["mean_delta"] >= .02 and gain["ci95"][0] > 0:
             selection[f"{family}_finalist"] = challenger
     semantic, hybrid = selection["semantic_finalist"], selection["hybrid_finalist"]
-    sem_candidates = [semantic] + [run for run in ("semantic-small", "semantic-large")
+    sem_candidates = [semantic] + [run for run in (() if local_comparison else tuple("semantic-" + size for size in families))
                                    if run != semantic and eligible(run, semantic)]
     strongest = max(sem_candidates, key=lambda run: (report["systems"][run]["full_split"]["ndcg_at_5"], run == semantic))
     advantage = _comparison(report, hybrid, strongest)
@@ -361,9 +398,17 @@ def select_configuration(report: Mapping[str, Any], checks: Mapping[str, Mapping
     else:
         selection["serving"] = semantic
         selection["reasons"].append("Hybrid promotion threshold not met; retain the selected semantic approach.")
+    # The lexical baseline is a real contender, not a mandatory losing control.
+    # Use the same conservative improvement rule; never promote from missing labels.
+    current = selection["serving"]
+    lexical_gain = _comparison(report, "lexical", current)
+    if eligible("lexical", current) and lexical_gain["mean_delta"] >= .02 and lexical_gain["ci95"][0] > 0:
+        selection["serving"] = "lexical"
+        selection["reasons"].append("BM25 meets the same gain, uncertainty, contradiction and stability rules; select the simpler system.")
     selection["promoted"] = selection["serving"] != incumbent
     selection["strongest_eligible_semantic_comparator"] = strongest
-    selection["same_model_fusion"] = {size: _comparison(report, f"hybrid-{size}", f"semantic-{size}") for size in ("small", "large")}
+    selection["same_model_fusion"] = {size: _comparison(report, f"hybrid-{size}", f"semantic-{size}")
+                                      for size in (("local",) if local_comparison else families)}
     selection["evidence_statement"] = "Provisional LLM preference under this protocol; not human-validated superiority."
     return selection
 
