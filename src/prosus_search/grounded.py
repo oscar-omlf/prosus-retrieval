@@ -185,6 +185,9 @@ class GroundedSearch:
         self.vocabulary = frozenset().union(*(set(f['type_keys']) | set(f['name_keys']) for f in self.facts))
         from .understanding import SemanticInterpreter
         self.interpreter = SemanticInterpreter(config,allow_api=allow_api)
+        if facets:
+            from .facet_query import FacetQueryInterpreter
+            self.interpreter = FacetQueryInterpreter(self.interpreter)
         self.reranker = None
         if rerank:
             from .reranking import EvidenceReranker
@@ -244,7 +247,7 @@ class GroundedSearch:
         identity = interpret(raw_plan['identity'], self.vocabulary)
         plan = {'original':query, 'identity_phrase':raw_plan['identity'], 'identity_keys':identity['identity_keys'],
                 **{key:raw_plan[key] for key in ('canonical','domain','requirements','preferences','ambiguity','alternatives')},
-                'interpreter':'query-only LLM; cached budgeted structured output; no evaluation inputs'}
+                'interpreter':raw_plan.get('_interpreter','query-only LLM; cached budgeted structured output; no evaluation inputs')}
         if self.facet_facts is not None:
             plan['identity_keys']=sorted(keys(plan['identity_phrase']))
         vectors = self.client.embed([plan['original'], plan['canonical']], representation_version=VERSION + '-query', kind='query', bypass_cache=bypass_query_cache)

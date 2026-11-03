@@ -20,17 +20,64 @@ recorded in [the completed semantic evaluation](review/GROUNDED-SEMANTIC.md).
 `--mode grounded-facets` selects an additional experimental source-facet matcher
 over the same E5-small candidate pool. It preserves multiword identity modifiers,
 exact source evidence, component scope, unknowns and conflicts; compatibility
-tiers precede retrieval similarity. It still uses the existing query interpreter:
-cached plans work offline, while unseen queries require `--allow-api`. It does
-not use the remote reranker. The first complete 30-query development comparison
-was weaker than grounded-local (nDCG .674 versus .731 on the same fully judged
-522-pair pool), so neither the incumbent nor the default was changed. See
-[the initial measured experiment](review/evidence/facets-v1.json).
+tiers precede retrieval similarity. A fully consumed local grammar handles
+simple type/ingredient requests without an API; complex requests retain the
+existing semantic interpreter (cached plans work offline; uncached semantic
+requests require `--allow-api`). It does not use the remote reranker.
+
+The complete **532-pair** frozen-v5 comparison covers 30 development queries,
+29 with defined nDCG. Incumbent/grounded-local/selected-facets nDCG is
+**.540/.727/.737**, Success **7/9/9 out of 30**, MRR **.192/.283/.251**.
+Facets reduce hard-attribute contradictions **17/125 to 12/125** compared with
+grounded-local, while identity contradictions increase **35/150 to 37/150**.
+The paired facet nDCG delta is +.0106, 95% interval [-.0502,.0728]; no reliable
+gain is established. These are LLM judgments, not human ground truth. The
+initial version and the single scoring refinement are preserved, including
+regressions; the corrected second version is the experimental selection.
+Neither the incumbent nor the default was changed. Do not claim perfection,
+production readiness, full-catalog recall or a demonstrated overall improvement.
+
+[Final metrics and selection](review/evidence/grounded-facets.json),
+[ID-based judgments and repeat labels](review/evidence/grounded-facets-judgments.json),
+[serving/source integrity receipt](review/evidence/facets-integration.json),
+[initial version](review/evidence/facets-v1.json),
+[corrected version before common-pool expansion](review/evidence/facets-v2.json),
+[rejected scoring refinement](review/evidence/facets-v3.json).
+
+All 532 pairs are judged: 407 frozen v5 labels and 125 budgeted gateway labels
+(73 previously obtained plus 52 new pairs). The final preselected 20-pair
+independent panel agrees on all exact and binary grades; its small size and
+mostly reused primary pairs do not establish human accuracy. The old final
+70 queries and sealed challenge were not opened for this experiment.
+
+Representative outcomes relative to grounded-local: q0074 adds a grade-3 fried
+tilapia portion at rank three; q0034 moves explicitly Lebanese coalhada ahead
+of partial alternatives and removes Egyptian falafel from the top five; q0085
+regresses despite preserving wing products at the first two ranks, because
+other chicken dishes still fail the requested cut/style. Cuisine/form evidence
+and unknowns remain imperfect. Bounded caches reuse immutable query facets and
+normalization. All 30 development rankings replay exactly after memoization;
+one sequential E5 inference-bypass pass with cached semantic plans observed
+27.2 ms median and 35.6 ms p95. A separate six-query local-grammar check needed
+no API. These are not genuine-miss/load capacity or production SLA measurements.
+Complex new semantic queries still incur remote interpretation latency.
+Conservative cumulative API accounting is
+**$1.057273**, including uncertain reservations, below the unchanged $4.50 cap.
+No unit tests or full suite were added/run; actual serving and exact offline
+metric replay were verified. Unrelated working files were preserved.
 
 ```powershell
 python scripts/score_grounded.py --facets
 python scripts/complete_grounded.py --folder work/grounded-facets
+python scripts/score_grounded.py --replay review/evidence/grounded-facets.json
+python -m prosus_search search "hamburguer sem cheddar com bacon" --mode grounded-facets --json
 ```
+
+The first two commands regenerate current serving rankings and obtain any missing
+blinded judgments using the existing ignored `.env` loader and cumulative ledger;
+saved earlier experiment checkpoints under `work/` retain the expanded controls.
+The `--replay` command needs the committed evidence only and verifies the final
+metrics plus independent-label sensitivity without inference, credentials or API.
 
 **Working now:** offline multilingual E5, BM25 and their RRF combination;
 100 queries × five results × three local runs. The independent review implements

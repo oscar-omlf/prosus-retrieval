@@ -7,11 +7,17 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from functools import lru_cache
 
-from .grounded import keys
+from .grounded import keys as _keys
 from .snapshots import freeze_json
 
-VERSION = 'source-facets-v1'
+VERSION = 'source-facets-v2'
+
+
+@lru_cache(maxsize=16384)
+def keys(text):
+    return _keys(text)  # immutable frozenset; safe across requests
 
 # Canonical values and ordinary Portuguese/catalog aliases. These are not
 # inferred recipes: e.g. a falafel label never establishes its ingredients.
@@ -40,6 +46,8 @@ VOCABULARY = {
                     'roasted':'assado assada', 'boiled':'cozido cozida',
                     'breaded':'empanado empanada milanesa', 'smoked':'defumado defumada'},
     'texture': {'crisp':'crocante crocantes', 'creamy':'cremoso cremosa', 'soft':'macio macia fofinho fofinha'},
+    'appearance': {'golden':'dourado dourada dourados douradas'},
+    'spice': {'spicy':'apimentado apimentada picante picantes'},
     'cuisine': {'korean':'coreano coreana coreanos coreanas', 'japanese':'japones japonesa',
                 'chinese':'chines chinesa', 'thai':'tailandes tailandesa', 'indian':'indiano indiana',
                 'lebanese':'libanes libanesa', 'egyptian':'egipcio egipcia',
@@ -60,6 +68,7 @@ GENERIC = keys('produto produtos comida comidas prato pratos jantar almoco alime
 SIDE = re.compile(r'\b(?:acompanh\w*|guarnic\w*|servid[oa] com|opciona\w*|escolha|escolher|adiciona\w*)\b')
 
 
+@lru_cache(maxsize=16384)
 def fold(text):
     return ''.join(c for c in unicodedata.normalize('NFKD', text.casefold()) if not unicodedata.combining(c))
 
@@ -75,7 +84,9 @@ LOOKUP = {facet:{key:value for value,aliases in values.items() for key in keys(a
 
 def extract(text, path, *, scope='main'):
     result=[]
-    side=SIDE.search(fold(text)) if path=='/description' else None
+    side=SIDE.search(fold(text)) if path in {'/description','/name'} else None
+    if path=='/name' and side and side.start()==0:
+        side=None
     for word in re.finditer(r'\b\w+\b', text):
         stems=keys(word.group())
         if not stems:
@@ -84,6 +95,8 @@ def extract(text, path, *, scope='main'):
             value=next((lookup[s] for s in stems if s in lookup),None)
             if value is None:
                 continue
+            if facet=='type' and value=='potato' and fold(word.group()) not in {'batata','batatas','fritas'}:
+                continue  # "frito" is preparation, not the plural noun "fritas".
             # Ambiguous standalone words do not establish a retail identity.
             if facet=='type' and value in {'wipes','sandwich'}:
                 if value=='wipes' and not phrase(text,'umedecido'):
@@ -112,9 +125,13 @@ def product_facets(record):
             word=next((w for w in re.findall(r'[^_\W]+',original) if keys(w)==keys(claim['quote'])),None)
             if word:
                 claims.append({**claim,'quote':word})
-    ordered=[c['value'] for c in claims if c['facet']=='type' and c['path']=='/name' and c['polarity']=='present']
+    ordered=[c['value'] for c in claims if c['facet']=='type' and c['path']=='/name' and c['polarity']=='present' and c['scope']=='main']
     forms=[v for v in ordered if v not in PROTEINS]
     name_types=set(forms if 'combo' in forms else forms[:1] or ordered[:1])
+    # A named anatomical cut disambiguates "coxinha da asa" from pastry.
+    if name_types=={'snack'} and 'chicken' in ordered and any(
+            c['facet']=='cut' and c['value']=='wing' and c['path']=='/name' for c in claims):
+        name_types={'chicken'}
     catalog_types={c['value'] for c in claims if c['facet']=='type' and c['path']!='/description' and c['polarity']=='present'}
     taxonomy_forms={c['value'] for c in claims if c['facet']=='type' and c['path']!='/name' and c['path']!='/description' and c['value'] not in PROTEINS}
     selected=taxonomy_forms if name_types and name_types<=PROTEINS and taxonomy_forms else name_types or catalog_types
@@ -124,13 +141,22 @@ def product_facets(record):
 
 
 def identity(plan):
-    text=plan['identity_phrase']
-    claims=extract(text,'/query/identity')
+    return _identity(plan['identity_phrase'])
+
+
+@lru_cache(maxsize=4096)
+def _identity(text):
+    claims=tuple(freeze_json(c) for c in extract(text,'/query/identity'))
     ordered=[c for c in claims if c['facet']=='type']
     primary=ordered[0]['value'] if ordered else None
     for c in ordered[1:]:
         if primary in lineage(c['value'],PARENTS):primary=c['value']
-    return {'types':{primary} if primary else set(),'keys':keys(text)-GENERIC,'claims':claims}
+    return freeze_json({'types':tuple([primary]) if primary else (), 'keys':tuple(sorted(keys(text)-GENERIC)), 'claims':claims})
+
+
+@lru_cache(maxsize=4096)
+def _wanted(value):
+    return tuple(freeze_json(c) for c in extract(value,'/query/requirement') if c['facet']!='type')
 
 
 def lineage(value, parents):
@@ -147,7 +173,7 @@ def requirement(req, facts, source):
         claims=source['portion_claims']
         return ('unknown' if not claims else 'conflict' if len(claims)>1 else
                 'supported' if int(value) in claims else 'contradicted'),[]
-    wanted=[c for c in extract(value,'/query/requirement') if c['facet']!='type']
+    wanted=_wanted(value)
     evidence=[];states=[]
     for w in wanted:
         candidates=[c for c in facts['claims'] if c['facet']==w['facet'] and c['scope']=='main']
@@ -205,7 +231,8 @@ def compatibility(plan, facts, source):
     first_word=next(iter(re.findall(r'\b\w+\b',plan['identity_phrase'])), '')
     if not wanted['types'] and keys(first_word)&GENERIC and plan.get('domain')=='prepared_food' and source['domain']=='prepared_food':
         identity_status='supported'
-    if not wanted['types'] and wanted['keys'] and wanted['keys']<=set(source['name_keys']):
+    main_name=SIDE.split(fold(source['explicit_text'].split('\n',1)[0]),maxsplit=1)[0].split('/')[0]
+    if not wanted['types'] and wanted['keys'] and set(wanted['keys'])<=keys(main_name):
         identity_status='supported'
     identity_evidence=[c for c in facts['claims'] if c['facet']=='type' and c['path']!='/description']
     statuses=[]
@@ -222,13 +249,15 @@ def compatibility(plan, facts, source):
                      plan.get('domain')=='retail' and source['domain'] in {'prepared_food','grocery'})
     contradicted=contradicted or domain_conflict
     uncertain=any(s['status'] in {'unknown','conflict'} for s in statuses)
-    tier=3 if contradicted else 2 if identity_status=='unknown' else 1 if uncertain else 0
-    coverage=len(wanted['keys']&set(source['name_keys']))/len(wanted['keys']) if wanted['keys'] else 0.
+    readiness_unknown=plan.get('domain')=='prepared_food' and source['domain']=='grocery'
+    tier=3 if contradicted else 2 if identity_status=='unknown' or readiness_unknown else 1 if uncertain else 0
+    coverage=len(set(wanted['keys'])&keys(main_name))/len(wanted['keys']) if wanted['keys'] else 0.
     matches=sum(s['status']=='supported' for s in statuses)/max(1,len(statuses))
     # Retrieval contributes <1 and cannot cross the ten-point compatibility
     # tiers. Name coverage and support are bounded tie breakers.
     score=10.*(3-tier)+.5*coverage+.25*matches
     return score,{'identity_status':identity_status,'identity_types':sorted(wanted['types']),
         'product_types':sorted(offered),'identity_evidence':identity_evidence,'tier':tier,'domain_conflict':domain_conflict,
+        'readiness_unknown':readiness_unknown,
         'requirements':statuses,'unknown_requirements':sum(s['status'] in {'unknown','conflict'} for s in statuses),
         'type_sources_conflict':facts['type_sources_conflict'],'historical_options_used_as_evidence':False}

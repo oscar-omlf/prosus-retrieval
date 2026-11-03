@@ -20,10 +20,12 @@ class SearchBusyError(RuntimeError):
 
 
 class SearchService:
-    """Reusable process-local search instance; no judge or rewrite in this path.
+    """Reusable process-local search instance with explicitly selected methods.
 
-    Local search never calls a remote model. Hosted cache misses fail unless the
-    caller explicitly enables APIs. Construct once to amortize model/index load.
+    Incumbent local modes need no remote model. Grounded modes may use their
+    versioned semantic interpreter; facet mode handles exact simple grammar
+    locally. Remote cache misses require explicit API permission. Construct once
+    to amortize model/index load.
     """
 
     def __init__(self, config: Config | str = "config.toml", *, mode: str | None = None,
