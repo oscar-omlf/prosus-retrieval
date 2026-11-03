@@ -1,431 +1,329 @@
-# Constraint-aware semantic search for a Portuguese marketplace
+# Portuguese marketplace search
 
-## Overview
+This project retrieves relevant catalog offers from natural-language Portuguese
+queries. It combines local semantic embeddings, lexical matching, explicit
+ingredient constraints and optional contextual reranking. The implementation
+runs on one machine and exposes one entry point: `python scripts/main.py`.
+Installation also provides `food-search`, which calls the same CLI implementation.
 
-This project matches natural-language Portuguese queries to offers in a mixed
-food and retail catalog. The solution combines local semantic embeddings,
-lexical retrieval, source-backed ingredient constraints and an optional language
-model reranker. It returns five ranked offers for each of the 100 assignment
-queries.
+## Problem and data
 
-The main design decision is to separate **retrieving a plausible product** from
-**checking whether it contradicts the request**. A burger can be semantically
-close to “hambúrguer sem queijo” while explicitly containing cheddar. Conversely,
-a burger whose description omits cheese is uncertain, not necessarily
-incompatible. Similarity alone cannot make that distinction reliably.
+The assignment supplies 100 queries and 5,000 catalog rows. Removing three
+identical duplicate occurrences leaves **4,997 distinct offers from 1,806
+merchants**. The catalog includes restaurant dishes, groceries, drinks and
+household products; only 1,707 offers are classified as prepared foods.
+Restricting retrieval to restaurant dishes would therefore lose valid results.
 
-The submitted predictions use the contextual reranking mode. A faster
-constraint-aware control and the original offline embedding baseline remain
-available for comparison and reproducibility. The experiments favor contextual
-ranking on development queries, but the smaller fresh evaluation does not
-establish a universal improvement.
+The data also limits what a search system can establish. There are 853 blank
+descriptions, imperfect categories and 134 zero prices. Historical customizations
+describe previous orders, not necessarily today's options. The implementation
+preserves source provenance and treats missing product facts as unknown.
 
-**Deliverables:** [ranked results for all 100 queries](review/submission/contextual-top5.csv),
-[five-slide presentation](review/submission/prosus-search-v4.pptx), and
-[release and cost manifest](review/submission/manifest.json).
+Two requirements drive the design:
 
-## 1. Understanding the data
+1. Retrieve the right product even when the query and listing use different words.
+2. Respect explicit exclusions without rejecting products merely because their
+   ingredient list is incomplete.
 
-The supplied CSV contains 5,000 rows, which reduce to **4,997 distinct offers**
-after removing three redundant occurrences of an identical item ID. Distinct
-offers from different merchants are retained, even when their text is similar.
+For example, a burger containing cheddar contradicts “hambúrguer sem queijo”.
+A burger whose listing never mentions cheese remains eligible. Optional cheese
+does not establish default inclusion, and “sem cheddar” does not establish
+absence of every cheese variety.
 
-| Observation | Consequence for the system |
-| --- | --- |
-| 1,806 merchants; only 1,707 offers belong to prepared foods | Preserve groceries, drinks and household products. Filtering the entire catalog to restaurant dishes would discard legitimate intents. |
-| 853 descriptions are blank | A missing ingredient mention cannot be interpreted as evidence of absence. |
-| Categories and taxonomy sometimes disagree with the offered product | Use them as retrieval context and ranking signals, not authoritative ingredient facts. |
-| Profiles include historical customizations, co-purchases and search terms | Keep these separate from current product evidence. An old cheese customization does not establish either default inclusion or present availability. |
-| Prices include 134 zeros | Do not interpret zero as a free product or use price as an unexplained relevance boost. |
+## Pipeline and system design
 
-The ingestion layer validates CSV/JSON structure, identifiers and numeric values,
-retains source provenance, and rejects conflicting duplicate IDs. These choices
-make results traceable to the supplied snapshot rather than silently repairing
-ambiguous records. [Data audit](review/evidence/data-audit.json).
-
-## 2. System design
-
-The system has an offline preparation stage and a request-time search stage.
-Product embeddings are built per catalog/model version; lexical indexes and
-evidence are assembled from the same snapshot at runtime initialization.
-Query interpretation and inference outputs are cached independently.
+The offline stage validates the catalog, constructs product representations and
+builds local indexes. It keeps vectors, lexical fields and ingredient evidence
+separate because they answer different questions.
 
 ```mermaid
 flowchart LR
     A[Catalog CSV] --> B[Validate and deduplicate]
     B --> C[Versioned product snapshot]
-    C --> D[Source-backed product text]
-    C --> E[Name, category and description fields]
-    C --> F[Ingredient claims with source spans]
-    D --> G[Local E5 passage embeddings]
+    C --> D[Product text]
+    C --> E[Name, category, description]
+    C --> F[Ingredient evidence and source spans]
+    D --> G[Local E5 embeddings]
     G --> H[Normalized vector matrix]
-    E --> I[Lexical indexes]
-    F --> J[Constraint evidence]
-    H --> K[Search runtime]
-    I --> K
-    J --> K
+    E --> I[Field lexical indexes]
+    H --> J[Search runtime]
+    I --> J
+    F --> J
 ```
 
-For the current representation, product text contains the name, selected type,
-category, description and separately declared portions. The frozen baseline
-retains its original, fuller metadata representation. Keeping the two versions
-distinct prevents a representation change from silently altering old results.
-Neither representation inserts guessed recipes or historical behavior into the
-product description.
-
-At request time, the contextual mode follows this pipeline:
+The contextual search path then separates candidate selection from final ordering:
 
 ```mermaid
 flowchart TD
-    Q[Original Portuguese query] --> P[Interpret identity, requirements, exclusions and preferences]
-    P --> G[Determine compatible offers from source evidence]
-    G --> L[Field lexical ranking]
-    G --> H[Dense and lexical rank fusion]
-    G --> C[Existing constraint-aware control]
-    L --> U[Round-robin union: up to 24 distinct candidates]
-    H --> U
-    C --> U
-    U --> S[Deterministically shuffle candidate order]
-    Q --> R[GPT-4.1-mini contextual reranker]
-    S --> R
-    R --> V[Validate IDs and recheck source constraints]
-    V --> O[Top five offers with IDs and evidence]
+    A[Portuguese query] --> B[Identity, requirements, exclusions, preferences]
+    B --> C[Source-backed compatibility checks]
+    C --> D[Field lexical ranking]
+    C --> E[Dense and lexical rank fusion]
+    C --> F[Constraint-aware control ranking]
+    D --> G[Round-robin union: up to 24 distinct offers]
+    E --> G
+    F --> G
+    G --> H[GPT-4.1-mini contextual reranking]
+    A --> H
+    H --> I[Validate IDs and recheck constraints]
+    I --> J[Top five offers]
 ```
 
-This is a retrieve-then-rank architecture, with reliable constraint checks
-applied **before** candidate cutoffs. It avoids spending the shortlist on known
-contradictions and then trying to repair the final five with score penalties.
+### 1. Represent queries and products separately
 
-### 2.1 Query interpretation
+Product text contains the name, selected type, category, description and declared
+portions. It does not add inferred recipes or behavioral profile information.
+The offline semantic baseline retains its fuller metadata representation; the
+constraint-aware path uses a separate source-backed representation.
 
-The query is represented as product identity, explicit requirements, exclusions,
-preferences and ambiguity. For example, “pizza sem queijo para compartilhar”
-contains a product type, an ingredient exclusion and a sharing preference. It
-does not specify an exact number of people.
+Query interpretation separates product identity, explicit requirements,
+exclusions, preferences and ambiguity. A narrow local grammar handles supported
+simple ingredient requests. Contextual mode uses GPT-4.1-mini for complex
+uncached interpretations, with exact query spans attached to requirements.
+The interpreter receives only the query. The original query remains available
+for retrieval and reranking, rather than being replaced completely by a rewrite.
 
-A narrow local grammar handles supported simple ingredient queries. Other
-queries use a cached, structured GPT-4.1-mini interpretation in contextual mode.
-The interpreter receives only the query. Requirements retain exact query spans;
-it receives no catalog candidates, evaluation cards or relevance labels.
+This distinction prevents an occasion such as “para compartilhar” from becoming
+an invented numerical portion requirement. It also separates uncertain intent
+from facts actually stated about a product.
 
-Separating these fields matters because a preference such as an occasion should
-not automatically become a mandatory product fact. The original query is also
-retained for dense retrieval and reranking, so a mistaken canonical interpretation
-does not completely replace what the user wrote.
+### 2. Enforce explicit ingredient constraints
 
-### 2.2 Product evidence and ingredient constraints
+The matcher extracts recognized ingredient claims from names and descriptions,
+retaining their field, quote, character offsets, polarity and component scope.
+It distinguishes main ingredients, included sides, optional additions and
+possible ingredient mentions.
 
-Ingredient claims come from the product's name and description. Each recognized
-claim records its source field, quoted text, offsets, polarity and component
-scope. Scope distinguishes the main product, an included side, an optional
-addition and a possible ingredient mention.
+Ingredient relationships are directional. Included cheddar supports the presence
+of cheese; absence of cheddar does not prove absence of cheese. Included sides
+count when evaluating exclusions. Historical customizations never establish
+default ingredients or current availability.
 
-For “sem queijo”, the policy is:
+Reliable contradictions are filtered **before candidate truncation**. Rankings
+therefore draw replacement offers from deeper compatible positions, rather than
+discarding a finished top five and leaving avoidable gaps. Unspecified ingredients
+remain eligible; supported absence can help the control rank comparable offers.
+The final contextual results are checked again against the same evidence.
 
-| Product evidence | Treatment |
-| --- | --- |
-| Explicitly includes cheese or a recognized variety such as cheddar | Exclude. |
-| Explicitly states absence of cheese | Retain and provide positive support. |
-| Does not specify cheese | Retain as unknown. |
-| Offers cheese as an optional addition | Do not infer default inclusion. |
-| Says “sem cheddar” | Do not infer absence of all cheese varieties. |
-| Includes a cheese-containing side | Treat the side as part of the offered product for an exclusion. |
+This is a bounded source matcher, not a complete recipe or allergen knowledge
+base. It cannot certify an unspecified product as cheese-free or allergy-safe.
+If contextual mode finds fewer than five compatible offers, it reports an error
+instead of padding with known contradictions. The fast control permits underfill.
 
-Ingredient relationships are directional: cheddar implies cheese, while absence
-of cheddar does not imply absence of cheese. Conflicting explicit claims remain
-conflicts rather than becoming unspecified. Unsupported taxonomy assumptions
-and historical customization records do not establish ingredient presence.
+### 3. Generate complementary candidates
 
-The constraint matcher deliberately uses a bounded vocabulary. It is useful for
-auditable exclusions, not a complete recipe, allergen or dietary knowledge base.
-It cannot certify that an unspecified product is cheese-free or safe for an
-allergy. [Implementation](src/prosus_search/constraints.py).
+The shortlist draws from three rankings:
 
-### 2.3 Candidate generation
+- **Field lexical:** Portuguese-normalized, stemmed BM25 matching over name,
+  category and description, with fixed weights **3/1/1**. Names receive more
+  weight because they usually identify the offered product most directly.
+- **Lean hybrid:** raw-query E5 similarity and field lexical ranking combined
+  through reciprocal-rank fusion, using depth **100** and constant **60**.
+- **Constraint-aware control:** original and positive-query dense retrieval,
+  lexical matching and bounded identity/attribute compatibility adjustments.
 
-The contextual shortlist combines three complementary rankings:
+The positive query omits excluded ingredient terms so that “sem queijo” does not
+give ordinary positive lexical credit to cheese-heavy products. The evidence
+matcher handles the exclusion itself.
 
-1. **Field lexical retrieval:** Portuguese-normalized, stemmed tokens from name,
-   category and description, with fixed BM25 field weights of 3/1/1. Names receive
-   more weight because they usually identify the offered product more directly.
-2. **Lean hybrid retrieval:** raw-query E5 similarity and field lexical ranking,
-   combined through reciprocal-rank fusion over the top 100 compatible offers.
-3. **The constraint-aware control:** original and positive-query dense retrieval,
-   lexical retrieval and bounded identity/attribute compatibility adjustments.
+Reciprocal-rank fusion sums `1 / (60 + rank)` across the lean hybrid's branches.
+It combines their ordering without treating BM25 and cosine scores as calibrated
+or interchangeable. The field weights and fusion settings are fixed engineering
+choices, not claimed optima.
 
-The positive retrieval query omits excluded ingredient names. Otherwise “sem
-queijo” could give ordinary positive lexical credit to cheese-heavy products.
-The exclusion itself is enforced through the separate evidence check.
+Round-robin selection merges the three lists, removes duplicate item IDs and
+keeps up to 24 offers. This preserves candidates from different retrieval methods
+instead of letting one heuristic choose every reranker input. The control still
+contains hand-built compatibility signals; the experiments do not establish
+that each individual signal is necessary.
 
-For the lean hybrid, reciprocal-rank fusion sums `1 / (60 + rank)` across its
-branches. Rank fusion avoids pretending that a BM25 score and a cosine score
-share a calibrated numerical scale. Depth 100, constant 60 and the field weights
-are fixed experiment settings, not proven optimal hyperparameters.
+### 4. Rank the shortlist in context
 
-Candidates are taken round-robin from the three lists, deduplicated by item ID,
-and capped at 24. This preserves alternatives from different retrieval methods
-instead of asking one ranking heuristic to choose every reranker input. The
-control still contains hand-built compatibility signals; the design does not
-claim those signals have been individually validated or eliminated.
+GPT-4.1-mini receives the original query, candidate names, categories, taxonomy
+and declared description excerpts of at most 600 characters. Candidate order is
+deterministically shuffled to reduce dependence on retrieval position. The model
+does not receive retrieval scores, evaluation labels or behavioral profiles.
 
-All three rankings operate over compatible offers before their cutoff. This
-provides replacement candidates from deeper ranks when explicit contradictions
-are removed. A final source check guards the returned IDs. If fewer than five
-compatible offers exist, contextual mode reports an error rather than padding
-with incompatible products; the fast control supports underfilled results.
+This stage addresses errors such as confusing a dish with its container,
+retrieving an ingredient instead of a prepared meal, or letting one matching
+adjective outweigh product identity. It must return five distinct IDs from the
+provided set. The application validates those IDs and checks ingredient
+compatibility before returning them.
 
-### 2.4 Contextual reranking
+The reranker cannot recover a missing candidate or a missing catalog fact, and
+excerpts can omit relevant detail. Its scores **5 through 1 express ordering**,
+not relevance probabilities.
 
-GPT-4.1-mini sees the original query and candidate names, categories, taxonomy and
-description excerpts of at most 600 characters. Candidate order is shuffled
-deterministically to reduce dependence on retrieval position. Retrieval scores,
-evaluation labels and behavioral profiles are excluded from the prompt.
+## Why these choices?
 
-The reranker addresses errors that individual token or embedding matches handle
-poorly: confusing a food with its container, choosing an ingredient instead of a
-prepared dish, or allowing one matching adjective to override product identity.
-It must return five distinct IDs from the supplied candidate set. The application
-validates that contract and rechecks the bounded source constraints.
+### Local multilingual E5-small
 
-This stage cannot recover a relevant offer missing from its shortlist, and an
-excerpt can omit useful detail. It also adds API latency and can make semantic
-mistakes. Its output scores are ordinal values 5 through 1, not estimated
-relevance probabilities. [Serving implementation](src/prosus_search/quality.py).
+The encoder is pinned `intfloat/multilingual-e5-small`, producing **384-dimensional**
+vectors through ONNX Runtime on CPU. The implementation applies `query:` and
+`passage:` prefixes, attention-mask mean pooling and L2 normalization. Exact dot
+products then give cosine similarity.
 
-## 3. Why these models and methods?
+E5-small provides semantic matching without per-query embedding API charges.
+Local inference makes the embedding path independently runnable, and its compact
+vectors suit this catalog. These operational advantages justify retaining it;
+they do not prove it is the best Portuguese food encoder.
 
-### E5-small instead of immediately buying a larger embedding model
+A prior E5-base comparison increased development pooled nDCG from .508 to .564,
+but Success@5 remained 10/30 and the paired interval included harm. It did not
+establish enough benefit to replace the incumbent. Earlier hosted embedding
+comparisons were blocked by API access; there is no completed equivalent
+comparison proving E5-small superior to OpenAI's embedding models.
 
-The retained encoder is pinned `intfloat/multilingual-e5-small`, producing
-384-dimensional vectors through local ONNX Runtime inference. Queries and
-products use the appropriate `query:` and `passage:` prefixes. Token embeddings
-are attention-mask mean-pooled and L2-normalized; retrieval uses exact dot
-products, equivalent to cosine similarity for these normalized vectors.
+### Hybrid retrieval and a bounded language-model stage
 
-E5-small provides a practical semantic baseline without per-query embedding API
-charges. Local inference also makes the embedding path independently runnable.
-Its compact vectors and the small catalog make exhaustive search straightforward.
-These are operational reasons to retain it, not proof that it is the strongest
-Portuguese food encoder.
+Embeddings handle paraphrases but do not reliably enforce logical negation.
+Lexical matching helps exact dishes, brands and ingredients but misses indirect
+requests. Combining their rankings preserves complementary matches.
 
-The larger-model evidence is mixed. A completed E5-base comparison increased
-development pooled nDCG from .508 to .564, but Success@5 stayed at 10/30 and the
-paired difference interval included harm. That did not establish enough benefit
-to replace the incumbent. A larger INT8 encoder experiment was specified, but it
-does not supply a completed judged superiority result for this submission.
-[E5-base comparison](review/E5-BASE-DECISION-v2.md).
+Contextual reranking targets whole-query interpretation rather than adding more
+individual ranking exceptions. GPT-4.1-mini was the inexpensive model evaluated
+for this stage; limiting its input to 24 candidates bounds cost. No controlled
+model sweep established that it outperforms every larger model or cross-encoder.
+Its inclusion rests on the measured architecture comparison, with uncertainty
+and latency kept explicit.
 
-OpenAI's small and large embedding models are supported in the experimental
-code. Earlier hosted comparisons were blocked by API access; there is no
-completed equivalent comparison here establishing that local E5 beats them.
-Choosing E5-small therefore avoids making the submission depend on an unfinished
-comparison. A future encoder replacement should demonstrate better candidate
-coverage on new queries under the same representation and evaluation policy.
+### Exact search, local state and omitted signals
 
-### Hybrid retrieval instead of embeddings alone or keywords alone
+With 4,997 offers, a normalized matrix and in-process lexical indexes are
+proportionate. A distributed vector database or approximate index would add
+deployment and recall trade-offs without a demonstrated need. SQLite persists
+caches and cumulative API accounting on one host.
 
-Embeddings help with paraphrases but do not reliably enforce logical negation.
-Lexical matching is useful for brands, named dishes and exact ingredients but
-can miss indirect requests. Combining their rankings preserves complementary
-matches. The lexical-only experiment was substantially weaker on the evaluated
-indirect queries, so it remains a candidate source rather than the final method.
+Images and behavioral profiles add cost or exposure bias without a demonstrated
+incremental relevance gain here. They also cannot prove default ingredients or
+current stock. Fine-tuning is deferred because the available labels are sparse
+and model-generated; training could fit annotation artifacts instead of relevance.
 
-The lean hybrid also lost to the existing control. This cautions against removing
-all query and attribute handling in the name of simplicity. However, that
-experiment changed several components together; it cannot prove that every
-existing compatibility rule is necessary.
+## Evaluation and observed trade-offs
 
-### A small contextual reranker instead of more ranking rules
-
-The observed errors often concerned the relationship between the complete query
-and product identity, rather than an absent synonym. A bounded language-model
-reranker can read those relationships directly, while candidate retrieval and
-source verification constrain its role.
-
-GPT-4.1-mini was the inexpensive model tested for this stage. Restricting it to
-24 candidates limits prompt size and cost compared with reading the whole
-catalog. There was no controlled model-family sweep proving mini superior to
-nano, GPT-4.1 or a dedicated cross-encoder. Its inclusion is justified by the
-measured architecture comparison, with the trade-offs below kept explicit.
-
-### Exact search and SQLite instead of a distributed search stack
-
-At 4,997 offers, a normalized vector matrix and in-process lexical indexes are
-sufficient for this prototype. An approximate nearest-neighbor service would
-introduce deployment and recall trade-offs without a demonstrated need. SQLite
-provides persistent caching and API accounting on one host. These choices make
-the assignment easier to reproduce; they are not a claim that this deployment
-architecture is sufficient for portfolio-scale traffic.
-
-Images, co-purchases and historical search terms are omitted because no
-incremental retrieval benefit was demonstrated. Behavioral fields can reinforce
-past exposure, while images cannot establish hidden ingredients. Fine-tuning is
-also deferred: the current sparse, model-generated labels could teach annotation
-artifacts as readily as better relevance.
-
-## 4. Evaluation without predefined ground truth
-
-The evaluation pools top-five candidates from competing systems and judges them
-under a shared rubric. Grades distinguish irrelevant, partial, useful and strong
-matches, with explicit treatment of product identity, requirements and missing
-evidence. All reported relevance labels are model judgments.
-
-The architecture comparison uses 30 development queries and a shared 390-pair
-pool. Compatible historical labels are preserved; new candidates receive new
-judgments. After the methods were frozen, a separate model authored 12 fresh
-synthetic queries without seeing the catalog, previous queries or rankings.
-Their shared pool contains 152 query-product pairs, judged primarily by GPT-4.1,
-separate from the GPT-4.1-mini reranker. Independent checks assess grader
-consistency. [Protocol and detailed evidence](review/REASSESSMENT.md).
-
-The metrics answer different questions:
-
-- **nDCG@5:** how well the five results are ordered relative to the judged pool's
-  ideal ranking. It is not accuracy or a full-catalog relevance measure.
-- **Success@5:** the fraction of queries with at least one useful result
-  (grade at least 2) among the first five.
-- **MRR@5:** how early the first useful result appears.
-- **Mandatory contradictions:** model-judged result positions conflicting with
-  mandatory requirements, which can concern identity or attributes, not only ingredients.
-- **Returned coverage:** whether five results were produced; this does not imply
-  five relevant products or establish catalog recall.
-
-### Results
+Prior experiments pooled results from competing methods and applied one judging
+policy within each comparison. The architecture study used 30 development queries
+and 390 judged query-product pairs. After freezing the methods, a separate model
+authored 12 fresh synthetic queries without access to the catalog or old rankings.
+GPT-4.1 judged their shared 152-pair pool, separately from the mini reranker;
+independent checks assessed grader consistency.
 
 | Method | Development nDCG@5 | Fresh nDCG@5 | Fresh Success@5 | Fresh mandatory conflicts |
 | --- | ---: | ---: | ---: | ---: |
 | Field lexical | .434 | .646 | 9/12 | 9/60 |
 | Lean hybrid | .530 | .706 | 9/12 | 10/60 |
 | Constraint-aware control | .654 | .774 | 10/12 | 2/60 |
-| Contextual reranker | **.787** | **.799** | **11/12** | 4/60 |
+| Contextual reranker | .787 | .799 | 11/12 | 4/60 |
 
-nDCG is defined for 29 development queries and 11 fresh queries; queries with
-zero pooled ideal gain remain in Success and MRR. Compare methods within a
-column. The two datasets have different pools and evaluation policies, so the
-columns do not describe improvement over time.
+**nDCG@5** measures ordering relative to the judged pool's ideal result, not
+accuracy or full-catalog recall. **Success@5** counts queries with at least one
+useful result, graded at least 2, in the first five. Mandatory conflicts can
+concern identity or attributes as well as ingredients.
 
-Contextual ranking improves the development point estimate, primarily through
-better product selection. On the fresh set, its nDCG advantage is only .024,
-with a paired 95% interval of **[-.095, +.165]**. Fresh MRR is slightly lower
-(.819 versus .833), and mandatory conflicts increase. One disputed exclusion
-judgment infers lactose status from condensed milk rather than an explicit
-lactose statement; the original label is retained and the uncertainty disclosed.
+nDCG is defined for 29 development and 11 fresh queries. Compare methods within
+each column: different pools and policies prevent interpreting the columns as
+improvement over time. The fresh contextual advantage is only .024, with a paired
+95% interval of **[-.095, +.165]**. MRR decreases slightly, and judged conflicts
+increase. A disputed lactose judgment illustrates that source citations alone
+do not validate a dietary inference.
 
-Consequently, the contextual method is submitted as an explicit quality option,
-while the default remains unchanged. It is not a demonstrated universal winner.
-The fresh set is small and synthetic; agreement between graders is not customer
-utility. The fresh query-card policy was also amended after a query-only pilot
-to allow open-ended discovery without an invented mandatory product identity.
-The amendment is versioned, and rankings did not change in response.
+These are automated estimates on a small synthetic set, not measured customer
+utility. The fresh query-card policy was amended after a query-only pilot to
+allow open discovery without inventing a mandatory product identity; rankings
+did not change in response. The old final 70 queries were not reused as an
+untouched tuning holdout. This source-only repository excludes historical
+judgment sets and generated outputs; the table summarizes the earlier runs.
 
-The old final 70 queries were already evaluated and were not reused as an
-untouched holdout for tuning this architecture. Exporting predictions for all
-100 assignment queries is separate from making a new held-out quality claim.
+Local control top-100 generation measured **26.5 ms median** with cached plans
+and query embeddings. First API ranking calls added **1.6 seconds median**, about
+**$0.0016/query** over 30 requests. These are component measurements, not an
+end-to-end production SLA. Contextual mode remains an explicit option because
+the evidence does not justify a universal replacement.
 
-## 5. Runtime, reliability and production limits
+## Run the application
 
-| Measurement | Observed result | Scope |
-| --- | --- | --- |
-| Local control top-100 generation | 26.5 ms median | Cached interpretations and query embeddings; not full contextual latency. |
-| First API reranking request | 1.6 s median; about 2.0 s p95 | 30 development requests, including validation and ledger settlement; additional to candidate generation. |
-| Reranking cost | About $0.0016/query | Confirmed ranking calls; uncached query interpretation can add cost. |
-| Cumulative API accounting | $2.623069 against a $4.50 ceiling | Includes prior experiments, failed/invalid calls and conservative uncertain reservations. |
-
-These measurements do not establish production throughput, an end-to-end SLA or
-a conversion uplift. In particular, cached embedding lookup and fresh embedding
-inference are different workloads.
-
-Model assets, source snapshots, representations and releases are fingerprinted.
-Embedding caches include model/representation identity; reranking caches include
-the actual candidate packet and prompt contract. Cached experiment rankings were
-imported only after verifying exact serving inputs. The application reproduced
-all 42 measured contextual rankings and matched all 500 submitted result IDs
-through actual HTTP requests.
-
-Remote calls require explicit `--allow-api` and reserve against the persistent
-cumulative ledger before transmission. Contextual mode uses `OPENAI_NEW_KEY`
-only at the official OpenAI endpoint. Credentials are excluded from version
-control and logs. Failed calls produce explicit errors; the application does
-not silently switch providers or ranking methods. The localhost service reuses
-loaded indexes and applies admission control rather than permitting unbounded
-concurrent inference.
-
-Before production, the most valuable additions are live merchant/location/stock
-eligibility, current option data and source freshness. Broader untouched query
-evaluation should then determine when reranking earns its latency and cost.
-Shared accounting, service replication, larger indexes or a distilled reranker
-should follow measured traffic and catalog bottlenecks. No such scale benefit is
-claimed from this local prototype.
-
-## 6. Running and reproducing the submission
-
-Use Python 3.12+ and place the supplied `5k_items_curated.csv` and `queries.csv`
-in the repository root. Raw inputs, model weights, local caches and credentials
-are intentionally untracked.
+Use Python **3.12+** and place the supplied `5k_items_curated.csv` and `queries.csv`
+in the project root. The input files, credentials, models, caches and generated
+outputs remain local and ignored by Git.
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements-lock.txt
-python -m pip install --no-deps -e .
-python -m prosus_search setup --local-model
-python -m prosus_search build --backend local
-python -m prosus_search search "pizza de queijo" --mode semantic-local --json
+python -m pip install -e .
+python scripts/main.py setup
+python scripts/main.py build
+python scripts/main.py search "pizza de queijo" --json
 ```
 
-The lock file records the tested Windows environment. On macOS/Linux activate
-with `source .venv/bin/activate`; `pip install -e '.[local,dev]'` is the alternative
-dependency installation. Initial model setup downloads approximately 490 MB.
-The fresh artifact rebuild was verified using existing assets and caches, not
-an entirely fresh network installation.
+On macOS/Linux activate with `source .venv/bin/activate`. Initial setup downloads
+the pinned model assets, approximately 490 MB. `requirements-lock.txt` records
+the tested Windows environment for an exact dependency installation.
 
-For the submitted contextual mode, set a normal OpenAI key as `OPENAI_NEW_KEY`
-in ignored root `.env`, then run:
+For contextual search, put a normal OpenAI key in ignored `.env`:
+
+```dotenv
+OPENAI_NEW_KEY=your_key_here
+```
 
 ```powershell
-python -m prosus_search search "hamburguer sem queijo" --mode contextual --allow-api --json
-python -m prosus_search serve --mode contextual --port 8766 --allow-api
+python scripts/main.py search "hamburguer sem queijo" --mode contextual --allow-api --json
+python scripts/main.py batch --mode contextual --allow-api --output outputs/results.csv
+python scripts/main.py serve --mode contextual --allow-api --port 8766
+python scripts/main.py budget
 ```
 
-The service binds to localhost and exposes `/health` and
-`/search?q=hamburguer%20sem%20queijo&k=5`. Contextual mode supports `k=1..5`.
-The `constraint-hybrid` mode is the fast control; `semantic-local` is the frozen
-offline default and does not guarantee ingredient filtering. Simple or cached
-constraint queries can work offline; uncached complex interpretation requires
-the appropriate explicit API route. [Operational details](review/SUBMISSION.md).
+The server binds to localhost and exposes `/health` and
+`/search?q=hamburguer%20sem%20queijo&k=5`. Batch output contains query/item IDs,
+ranks, scores, mode and release ID; it omits source descriptions. Existing output
+files require `--overwrite` to replace explicitly.
 
-Replay the saved comparisons and verify the submission without paid judging:
-
-```powershell
-python scripts/reassessment_lab.py replay
-python scripts/reassessment_open_intent.py --replay
-python scripts/verify_submission.py
-python -m prosus_search budget
-```
-
-To intentionally regenerate all predictions after setup, use
-`python scripts/prepare_quality_submission.py --export --allow-api`. This can
-make paid calls and replace export receipts; preserve the submitted files first.
-Fresh model outputs need not be byte-identical to the committed predictions.
-
-The last full tracked test run passed **513 tests**. Verification also covers
-ID/schema validation, ingredient hierarchy, negation, optional additions,
-included sides, unspecified-product retention, budget behavior, cached parity
-and actual uncached API requests. [Verification receipts](review/SUBMISSION.md#what-is-verified).
-
-### Code organization
-
-| Module | Responsibility |
+| Mode | Purpose |
 | --- | --- |
-| [`catalog.py`](src/prosus_search/catalog.py), [`representation.py`](src/prosus_search/representation.py) | Validated ingestion, provenance and the frozen baseline text representation. |
-| [`local_embeddings.py`](src/prosus_search/local_embeddings.py), [`retrieval.py`](src/prosus_search/retrieval.py) | Pinned E5 inference, lexical indexes, exact scoring and stable ranking. |
-| [`grounded.py`](src/prosus_search/grounded.py), [`understanding.py`](src/prosus_search/understanding.py) | Source-backed product representation and query interpretation. |
-| [`constraints.py`](src/prosus_search/constraints.py), [`facets.py`](src/prosus_search/facets.py) | Ingredient evidence, relationships, component scope and compatibility signals. |
-| [`quality.py`](src/prosus_search/quality.py) | Candidate union, official API routing, contextual reranking and final verification. |
-| [`store.py`](src/prosus_search/store.py), [`artifacts.py`](src/prosus_search/artifacts.py) | Persistent caches, budget accounting and versioned artifacts. |
-| [`cli.py`](src/prosus_search/cli.py), [`server.py`](src/prosus_search/server.py) | Command-line and localhost interfaces. |
+| `semantic-local` | Default offline semantic baseline. It does not enforce ingredient exclusions. |
+| `lexical`, `hybrid-local` | Offline comparison methods. |
+| `constraint-hybrid` | Fast constraint-aware control; simple or cached interpretations work offline. |
+| `contextual` | Constraint-aware shortlist plus GPT-4.1-mini ordering; supports `k=1..5`. |
 
-`review/submission/` contains the selected deliverables. Other reports and
-evaluation artifacts under `review/`, `protocols/` and `results/` preserve the
-experimental history; their older costs, policies and defaults are snapshots,
-not additional current submission claims.
+`--allow-api` is available only for contextual mode. Complex uncached requests
+can require both interpretation and ranking calls. Valid results are cached by
+their inputs and policy. Calls reserve against the persistent **$4.50 cumulative
+ceiling** before transmission; missing credentials fail before reservation.
+Provider failures are reported without hidden retries or service substitution.
+The application uses `OPENAI_NEW_KEY` only at the official OpenAI endpoint.
+Keep the existing ledger when reusing local state: changing its allocations is
+rejected, and historical uncertain charges remain counted.
+Development and validation accounted for **$2.623361**, including uncertain
+reservations. The final uncached probe failed query-provenance validation.
+Such validation failures stop the request;
+the application does not silently repair the output or retry it.
+
+## Source organization
+
+```text
+scripts/main.py                 # single command entry point
+config.toml                     # data, model, retrieval and budget settings
+pyproject.toml                   # package and pinned direct dependencies
+requirements-lock.txt            # tested environment
+src/prosus_search/
+  cli.py                        # argument parsing and orchestration
+  indexing.py, artifacts.py      # index construction and versioned snapshots
+  catalog.py, representation.py  # validated input and baseline text
+  local_embeddings.py            # pinned local model inference
+  retrieval.py, grounded.py      # retrieval and constraint-aware control
+  constraints.py, facets.py      # source evidence and compatibility
+  understanding.py               # structured query interpretation
+  quality.py, model_client.py    # contextual ordering and validated API calls
+  runtime.py, store.py           # shared persistence, caches and accounting
+  batch.py, server.py            # batch and HTTP interfaces
+  eligibility.py, snapshots.py   # immutable context and snapshot validation
+```
+
+The cleaned application was checked against 135 core regressions, a real index
+build and all 500 previously generated result IDs. Cache reuse does not establish
+new model quality; it checks that restructuring preserved the existing rankings.
+
+Production work should begin with live merchant/location/stock eligibility,
+current option data and source freshness. Broader untouched query evaluation
+should determine when reranking earns its latency. Add shared caches, replicas,
+larger indexes or a distilled ranker only after measured traffic and catalog
+bottlenecks justify them.

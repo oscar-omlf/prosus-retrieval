@@ -1,28 +1,5 @@
-# Preserve exact assignment/input bytes and use portable LF for new source files.
-*.csv -text
 *.py text eol=lf
 *.toml text eol=lf
 *.json text eol=lf
 *.md text eol=lf
-*.mjs text eol=lf
-*.yml text eol=lf
-.githooks/* text eol=lf
-results/*.csv whitespace=cr-at-eol
-review/evidence/*.csv whitespace=cr-at-eol
-# Matplotlib emits trailing spaces inside SVG path data.
-review/figures/*.svg whitespace=-blank-at-eol
-review/figures/**/*.svg whitespace=-blank-at-eol
-AGENTS.md -text
-PROMPT.md -text
-# Immutable evaluation receipts bind exact bytes, including original line endings.
-review/evidence/relevance-v2/** -text whitespace=cr-at-eol
-review/evidence/manual-v4/** -text whitespace=cr-at-eol
-review/evidence/blind-panel-v4-independent.json -text whitespace=cr-at-eol
-review/evidence/relevance-v2-summary-*.json -text whitespace=cr-at-eol
-review/evidence/e5-base-v2/** -text whitespace=cr-at-eol
-review/evidence/reranker-v2/** -text whitespace=cr-at-eol
-review/evidence/intent-v5/** -text whitespace=cr-at-eol
-review/evidence/*-v6*.json -text whitespace=cr-at-eol
-review/evidence/field-v6/** -text whitespace=cr-at-eol
-review/evidence/encoder-v7/** -text whitespace=cr-at-eol
-review/INTENT-JUDGING-v5.txt text eol=lf
+*.txt text eol=lf
