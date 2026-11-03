@@ -11,6 +11,7 @@ results/*.csv whitespace=cr-at-eol
 review/evidence/*.csv whitespace=cr-at-eol
 # Matplotlib emits trailing spaces inside SVG path data.
 review/figures/*.svg whitespace=-blank-at-eol
+review/figures/**/*.svg whitespace=-blank-at-eol
 AGENTS.md -text
 PROMPT.md -text
 # Immutable evaluation receipts bind exact bytes, including original line endings.
