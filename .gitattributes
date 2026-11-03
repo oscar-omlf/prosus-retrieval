@@ -20,3 +20,4 @@ review/evidence/blind-panel-v4-independent.json -text whitespace=cr-at-eol
 review/evidence/relevance-v2-summary-*.json -text whitespace=cr-at-eol
 review/evidence/e5-base-v2/** -text whitespace=cr-at-eol
 review/evidence/reranker-v2/** -text whitespace=cr-at-eol
+review/evidence/intent-v5/** -text whitespace=cr-at-eol
