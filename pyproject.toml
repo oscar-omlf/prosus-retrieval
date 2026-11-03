@@ -14,6 +14,7 @@ dependencies = [
   "tiktoken==0.14.0",
   "openai==3.42.1",
   "python-dotenv==1.2.4",
+  "snowballstemmer==3.1.1",
 ]
 
 [project.optional-dependencies]

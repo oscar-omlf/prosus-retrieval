@@ -28,6 +28,7 @@ class CatalogRecord:
     source_ids: tuple[str, ...]
     source_lines: tuple[int, ...]
     profile_hash: str = ""
+    historical_options: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -180,7 +181,8 @@ def load_catalog(path: str | Path) -> Catalog:
             )
         else:
             records[item_id] = CatalogRecord(
-                item_id, merchant_id, metadata, (source_id,), (line,), hash_bytes(canonical_json(profile).encode("utf-8"))
+                item_id, merchant_id, metadata, (source_id,), (line,), hash_bytes(canonical_json(profile).encode("utf-8")),
+                tuple(profile.get("metrics", {}).get("customizations", [])),
             )
             signatures[item_id] = signature
     return Catalog(tuple(records[item_id] for item_id in sorted(records)), hash_bytes(raw), len(rows))

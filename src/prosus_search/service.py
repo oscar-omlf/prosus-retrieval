@@ -36,6 +36,12 @@ class SearchService:
         self.counter = token_counter(self.config)
         self.release_id = release_id
         self.embedder = None
+        if mode == "grounded-local":
+            from .grounded import GroundedSearch
+            self._grounded = GroundedSearch(self.config, release_id)
+            self.release_id = self._grounded.release_id
+            self.mode = mode
+            return
         pointer = None
         if mode is None or release_id is None and (self.config.resolve("artifacts") / "current.json").exists():
             pointer = load_current(self.config.resolve("artifacts"))
@@ -84,6 +90,9 @@ class SearchService:
 
     def _search(self, query: str, k: int, *, bypass_query_cache: bool,
                 eligibility: EligibilitySnapshot | None = None) -> dict:
+        if self.mode == "grounded-local":
+            text = prepare_query(query, self.counter, self.config["representation"]["query_token_cap"])
+            return self._grounded.search(text, k, bypass_query_cache=bypass_query_cache, eligibility=eligibility)
         start = time.perf_counter()
         if type(k) is not int or not 1 <= k <= len(self.engine.ids):
             raise ConfigError(f"k must be an integer between 1 and {len(self.engine.ids)}")

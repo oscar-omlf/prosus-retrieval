@@ -4,6 +4,17 @@ Type a Portuguese query and choose how many results to return. The system embeds
 the query, scores all **4,997 distinct catalog items**, and returns the top `k`.
 Product vectors are prepared once. Search never calls a relevance judge.
 
+An experimental grounded method is explicitly selectable with
+`python -m prosus_search search "hambúrguer sem queijo para viagem" --mode grounded-local --json`.
+It retains E5-small, builds separate source-backed product text, retrieves dense
+and lexical candidates, and applies a small compatibility scorer. Its parser is
+catalog-derived and lexical; it does not resolve arbitrary semantic ambiguity.
+Historical customization records are kept separately and establish neither base
+ingredients nor current availability. The first construction encodes the catalog;
+later constructions validate and reuse that matrix. This mode does not change
+the incumbent or current-release pointer. Detailed results and limitations are
+recorded in `review/GROUNDED-SEARCH.md` after the development comparison.
+
 **Working now:** offline multilingual E5, BM25 and their RRF combination;
 100 queries × five results × three local runs. The independent review implements
 a hosted-small comparison option and runs blinded evaluation through the assignment gateway;
