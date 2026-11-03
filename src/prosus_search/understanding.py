@@ -1,10 +1,16 @@
 """Cached, query-only semantic interpretation through the existing budgeted client."""
 from __future__ import annotations
 
+import json
+import re
+from copy import deepcopy
+from decimal import Decimal, InvalidOperation
+
 from .benchmark import open_store
 from .config import token_counter
 from .judge import JudgeClient, JudgeConfig, JudgmentValidationError, _payload
 from .evaluation import canonical_hash
+from .artifacts import file_hash
 
 INSTRUCTIONS = '''Interprete uma consulta em português para busca em marketplace misto:
 restaurantes, supermercado e varejo. Você recebe somente a consulta, nunca itens,
@@ -38,6 +44,22 @@ SCHEMA = obj({'identity':STRING,'canonical':STRING,
     'alternatives':{'type':'array','items':STRING}})
 
 
+def normalize_quantity_dimension(value):
+    """Correct only explicit measured units misclassified as person portions."""
+    fixed=deepcopy(value)
+    for req in fixed.get('requirements',[]):
+        if req.get('relation')!='portion':continue
+        span=req.get('source_span','')
+        measured=re.search(r'\b(\d+(?:[.,]\d+)?)\s*(?:ml|l|litros?|g|kg|gramas?|quilogramas?)\b',span,re.I)
+        if not measured or re.search(r'\bpessoas?\b',span,re.I):continue
+        try:
+            same=Decimal(req['value'].replace(',','.'))==Decimal(measured.group(1).replace(',','.'))
+        except (InvalidOperation,AttributeError):continue
+        if same:
+            req.update(relation='attribute',value=span)
+    return fixed
+
+
 def validate(value, query):
     if set(value) != set(SCHEMA['properties']) or value['domain'] not in SCHEMA['properties']['domain']['enum']:
         raise JudgmentValidationError('Invalid interpretation fields/domain')
@@ -55,8 +77,15 @@ def validate(value, query):
                 raise JudgmentValidationError('Interpretation clause lacks query provenance')
             if field=='requirements' and clause['relation'] not in SCHEMA['properties']['requirements']['items']['properties']['relation']['enum']:
                 raise JudgmentValidationError('Unknown interpretation relation')
-            if clause.get('relation')=='portion' and (not clause['value'].isdigit() or clause['value'] not in clause['source_span']):
-                raise JudgmentValidationError('Portion must preserve explicit query digits')
+            if clause.get('relation')=='portion':
+                words={'um':'1','uma':'1','dois':'2','duas':'2','tres':'3','três':'3',
+                       'quatro':'4','cinco':'5','seis':'6','sete':'7','oito':'8',
+                       'nove':'9','dez':'10','onze':'11','doze':'12'}
+                written=re.search(r'\b('+ '|'.join(words) +r')\s+pessoas?\b',clause['source_span'],re.I)
+                supported=clause['value'] in re.findall(r'\b\d+\b',clause['source_span']) or (
+                    written is not None and words[written.group(1).lower()]==clause['value'])
+                if not clause['value'].isdigit() or not supported:
+                    raise JudgmentValidationError('Portion must preserve an explicit digit or written person count')
     for field in ('ambiguity','alternatives'):
         if not isinstance(value[field],list) or any(not isinstance(x,str) for x in value[field]):
             raise JudgmentValidationError('Invalid semantic ambiguity alternatives')
@@ -71,12 +100,37 @@ class SemanticInterpreter:
             timeout_seconds=30,protocol_version='grounded-query-semantic-v1'),
             allow_api=allow_api,token_counter=token_counter(config),max_attempts=1)
         self.fingerprint=canonical_hash({'instructions':INSTRUCTIONS,'schema':SCHEMA,
-                                         'configuration':self.client.config.__dict__})
+                                         'configuration':self.client.config.__dict__,
+                                         'producer_sha256':file_hash(__file__)})
 
     def interpret(self,query):
         payload=_payload(self.client.config,INSTRUCTIONS,{'consulta':query},SCHEMA,'query_interpretation')
         record=self.client._execute(payload,'grounded-semantic-query-v1','development','query-understanding',
                                     lambda value:validate(value,query))
+        if record['status']!='valid' and record.get('reason')=='invalid_structured_output':
+            # Revalidate preserved raw output after the declared written-count
+            # validator correction. Never edit the returned interpretation or
+            # overwrite the rejected response; no extra API request is needed.
+            for attempt in record.get('attempts',[]):
+                try:
+                    value=validate(normalize_quantity_dimension(json.loads(attempt.get('visible_output') or '')),query)
+                except (ValueError,TypeError,KeyError,JudgmentValidationError):
+                    continue
+                recovered={**record,'status':'valid','value':value,
+                    'validation_recovery':'explicit-quantity-dimension-v1',
+                    'derived_from_rejected_cache_key':record['cache_key']}
+                self.client.store.put('query-validation-recovery:'+canonical_hash([record['cache_key'],'quantity-dimension-v1']),recovered)
+                record=recovered
+                break
+        if record['status']!='valid' and record.get('reason')=='invalid_structured_output' and self.client.config.model.startswith('openai/gpt-4.1'):
+            # Declared query-only adjudication; no products, rankings or grades.
+            reviewer=JudgeClient(self.client.store,config=JudgeConfig.gpt41('openai/gpt-4.1',
+                base_url=self.client.config.base_url,input_token_cap=4096,output_token_cap=2048,
+                timeout_seconds=45,protocol_version='query-schema-adjudication-v1'),
+                allow_api=self.client.allow_api,token_counter=self.client.token_counter,max_attempts=1)
+            recovery_payload=_payload(reviewer.config,INSTRUCTIONS,{'consulta':query},SCHEMA,'query_interpretation')
+            record=reviewer._execute(recovery_payload,'query-schema-adjudication-v1','recovery','query-understanding',
+                lambda value:validate(normalize_quantity_dimension(value),query))
         if record['status']!='valid':
             attempts=record.get('attempts',[])
             status=attempts[-1].get('http_status') if attempts else None
