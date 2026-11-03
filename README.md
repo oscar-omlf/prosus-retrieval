@@ -1,16 +1,367 @@
-# Portuguese marketplace semantic search
+# Constraint-aware semantic search for a Portuguese marketplace
 
-**Submission:** [five-slide deck](review/submission/prosus-search-v4.pptx) ·
-[500 quality-mode predictions](review/submission/contextual-top5.csv) ·
-[setup, validation and evaluation guide](review/SUBMISSION.md) ·
-[manifest and API accounting](review/submission/manifest.json).
+## Overview
 
-Two explicit paths are available. The frozen `semantic-local` default runs
-offline; `--mode contextual --allow-api` adds the measured 24-candidate
-GPT-4.1-mini quality stage, with source-backed ingredient filtering and an
-official OpenAI key named `OPENAI_NEW_KEY` in ignored `.env`. The fast
-constraint-aware option remains `--mode constraint-hybrid`. No key is needed
-to read the submitted outputs or replay their evaluation.
+This project matches natural-language Portuguese queries to offers in a mixed
+food and retail catalog. The solution combines local semantic embeddings,
+lexical retrieval, source-backed ingredient constraints and an optional language
+model reranker. It returns five ranked offers for each of the 100 assignment
+queries.
+
+The main design decision is to separate **retrieving a plausible product** from
+**checking whether it contradicts the request**. A burger can be semantically
+close to “hambúrguer sem queijo” while explicitly containing cheddar. Conversely,
+a burger whose description omits cheese is uncertain, not necessarily
+incompatible. Similarity alone cannot make that distinction reliably.
+
+The submitted predictions use the contextual reranking mode. A faster
+constraint-aware control and the original offline embedding baseline remain
+available for comparison and reproducibility. The experiments favor contextual
+ranking on development queries, but the smaller fresh evaluation does not
+establish a universal improvement.
+
+**Deliverables:** [ranked results for all 100 queries](review/submission/contextual-top5.csv),
+[five-slide presentation](review/submission/prosus-search-v4.pptx), and
+[release and cost manifest](review/submission/manifest.json).
+
+## 1. Understanding the data
+
+The supplied CSV contains 5,000 rows, which reduce to **4,997 distinct offers**
+after removing three redundant occurrences of an identical item ID. Distinct
+offers from different merchants are retained, even when their text is similar.
+
+| Observation | Consequence for the system |
+| --- | --- |
+| 1,806 merchants; only 1,707 offers belong to prepared foods | Preserve groceries, drinks and household products. Filtering the entire catalog to restaurant dishes would discard legitimate intents. |
+| 853 descriptions are blank | A missing ingredient mention cannot be interpreted as evidence of absence. |
+| Categories and taxonomy sometimes disagree with the offered product | Use them as retrieval context and ranking signals, not authoritative ingredient facts. |
+| Profiles include historical customizations, co-purchases and search terms | Keep these separate from current product evidence. An old cheese customization does not establish either default inclusion or present availability. |
+| Prices include 134 zeros | Do not interpret zero as a free product or use price as an unexplained relevance boost. |
+
+The ingestion layer validates CSV/JSON structure, identifiers and numeric values,
+retains source provenance, and rejects conflicting duplicate IDs. These choices
+make results traceable to the supplied snapshot rather than silently repairing
+ambiguous records. [Data audit](review/evidence/data-audit.json).
+
+## 2. System design
+
+The system has an offline preparation stage and a request-time search stage.
+Product embeddings are built per catalog/model version; lexical indexes and
+evidence are assembled from the same snapshot at runtime initialization.
+Query interpretation and inference outputs are cached independently.
+
+```mermaid
+flowchart LR
+    A[Catalog CSV] --> B[Validate and deduplicate]
+    B --> C[Versioned product snapshot]
+    C --> D[Source-backed product text]
+    C --> E[Name, category and description fields]
+    C --> F[Ingredient claims with source spans]
+    D --> G[Local E5 passage embeddings]
+    G --> H[Normalized vector matrix]
+    E --> I[Lexical indexes]
+    F --> J[Constraint evidence]
+    H --> K[Search runtime]
+    I --> K
+    J --> K
+```
+
+For the current representation, product text contains the name, selected type,
+category, description and separately declared portions. The frozen baseline
+retains its original, fuller metadata representation. Keeping the two versions
+distinct prevents a representation change from silently altering old results.
+Neither representation inserts guessed recipes or historical behavior into the
+product description.
+
+At request time, the contextual mode follows this pipeline:
+
+```mermaid
+flowchart TD
+    Q[Original Portuguese query] --> P[Interpret identity, requirements, exclusions and preferences]
+    P --> G[Determine compatible offers from source evidence]
+    G --> L[Field lexical ranking]
+    G --> H[Dense and lexical rank fusion]
+    G --> C[Existing constraint-aware control]
+    L --> U[Round-robin union: up to 24 distinct candidates]
+    H --> U
+    C --> U
+    U --> S[Deterministically shuffle candidate order]
+    Q --> R[GPT-4.1-mini contextual reranker]
+    S --> R
+    R --> V[Validate IDs and recheck source constraints]
+    V --> O[Top five offers with IDs and evidence]
+```
+
+This is a retrieve-then-rank architecture, with reliable constraint checks
+applied **before** candidate cutoffs. It avoids spending the shortlist on known
+contradictions and then trying to repair the final five with score penalties.
+
+### 2.1 Query interpretation
+
+The query is represented as product identity, explicit requirements, exclusions,
+preferences and ambiguity. For example, “pizza sem queijo para compartilhar”
+contains a product type, an ingredient exclusion and a sharing preference. It
+does not specify an exact number of people.
+
+A narrow local grammar handles supported simple ingredient queries. Other
+queries use a cached, structured GPT-4.1-mini interpretation in contextual mode.
+The interpreter receives only the query. Requirements retain exact query spans;
+it receives no catalog candidates, evaluation cards or relevance labels.
+
+Separating these fields matters because a preference such as an occasion should
+not automatically become a mandatory product fact. The original query is also
+retained for dense retrieval and reranking, so a mistaken canonical interpretation
+does not completely replace what the user wrote.
+
+### 2.2 Product evidence and ingredient constraints
+
+Ingredient claims come from the product's name and description. Each recognized
+claim records its source field, quoted text, offsets, polarity and component
+scope. Scope distinguishes the main product, an included side, an optional
+addition and a possible ingredient mention.
+
+For “sem queijo”, the policy is:
+
+| Product evidence | Treatment |
+| --- | --- |
+| Explicitly includes cheese or a recognized variety such as cheddar | Exclude. |
+| Explicitly states absence of cheese | Retain and provide positive support. |
+| Does not specify cheese | Retain as unknown. |
+| Offers cheese as an optional addition | Do not infer default inclusion. |
+| Says “sem cheddar” | Do not infer absence of all cheese varieties. |
+| Includes a cheese-containing side | Treat the side as part of the offered product for an exclusion. |
+
+Ingredient relationships are directional: cheddar implies cheese, while absence
+of cheddar does not imply absence of cheese. Conflicting explicit claims remain
+conflicts rather than becoming unspecified. Unsupported taxonomy assumptions
+and historical customization records do not establish ingredient presence.
+
+The constraint matcher deliberately uses a bounded vocabulary. It is useful for
+auditable exclusions, not a complete recipe, allergen or dietary knowledge base.
+It cannot certify that an unspecified product is cheese-free or safe for an
+allergy. [Implementation](src/prosus_search/constraints.py).
+
+### 2.3 Candidate generation
+
+The contextual shortlist combines three complementary rankings:
+
+1. **Field lexical retrieval:** Portuguese-normalized, stemmed tokens from name,
+   category and description, with fixed BM25 field weights of 3/1/1. Names receive
+   more weight because they usually identify the offered product more directly.
+2. **Lean hybrid retrieval:** raw-query E5 similarity and field lexical ranking,
+   combined through reciprocal-rank fusion over the top 100 compatible offers.
+3. **The constraint-aware control:** original and positive-query dense retrieval,
+   lexical retrieval and bounded identity/attribute compatibility adjustments.
+
+The positive retrieval query omits excluded ingredient names. Otherwise “sem
+queijo” could give ordinary positive lexical credit to cheese-heavy products.
+The exclusion itself is enforced through the separate evidence check.
+
+For the lean hybrid, reciprocal-rank fusion sums `1 / (60 + rank)` across its
+branches. Rank fusion avoids pretending that a BM25 score and a cosine score
+share a calibrated numerical scale. Depth 100, constant 60 and the field weights
+are fixed experiment settings, not proven optimal hyperparameters.
+
+Candidates are taken round-robin from the three lists, deduplicated by item ID,
+and capped at 24. This preserves alternatives from different retrieval methods
+instead of asking one ranking heuristic to choose every reranker input. The
+control still contains hand-built compatibility signals; the design does not
+claim those signals have been individually validated or eliminated.
+
+All three rankings operate over compatible offers before their cutoff. This
+provides replacement candidates from deeper ranks when explicit contradictions
+are removed. A final source check guards the returned IDs. If fewer than five
+compatible offers exist, contextual mode reports an error rather than padding
+with incompatible products; the fast control supports underfilled results.
+
+### 2.4 Contextual reranking
+
+GPT-4.1-mini sees the original query and candidate names, categories, taxonomy and
+description excerpts of at most 600 characters. Candidate order is shuffled
+deterministically to reduce dependence on retrieval position. Retrieval scores,
+evaluation labels and behavioral profiles are excluded from the prompt.
+
+The reranker addresses errors that individual token or embedding matches handle
+poorly: confusing a food with its container, choosing an ingredient instead of a
+prepared dish, or allowing one matching adjective to override product identity.
+It must return five distinct IDs from the supplied candidate set. The application
+validates that contract and rechecks the bounded source constraints.
+
+This stage cannot recover a relevant offer missing from its shortlist, and an
+excerpt can omit useful detail. It also adds API latency and can make semantic
+mistakes. Its output scores are ordinal values 5 through 1, not estimated
+relevance probabilities. [Serving implementation](src/prosus_search/quality.py).
+
+## 3. Why these models and methods?
+
+### E5-small instead of immediately buying a larger embedding model
+
+The retained encoder is pinned `intfloat/multilingual-e5-small`, producing
+384-dimensional vectors through local ONNX Runtime inference. Queries and
+products use the appropriate `query:` and `passage:` prefixes. Token embeddings
+are attention-mask mean-pooled and L2-normalized; retrieval uses exact dot
+products, equivalent to cosine similarity for these normalized vectors.
+
+E5-small provides a practical semantic baseline without per-query embedding API
+charges. Local inference also makes the embedding path independently runnable.
+Its compact vectors and the small catalog make exhaustive search straightforward.
+These are operational reasons to retain it, not proof that it is the strongest
+Portuguese food encoder.
+
+The larger-model evidence is mixed. A completed E5-base comparison increased
+development pooled nDCG from .508 to .564, but Success@5 stayed at 10/30 and the
+paired difference interval included harm. That did not establish enough benefit
+to replace the incumbent. A larger INT8 encoder experiment was specified, but it
+does not supply a completed judged superiority result for this submission.
+[E5-base comparison](review/E5-BASE-DECISION-v2.md).
+
+OpenAI's small and large embedding models are supported in the experimental
+code. Earlier hosted comparisons were blocked by API access; there is no
+completed equivalent comparison here establishing that local E5 beats them.
+Choosing E5-small therefore avoids making the submission depend on an unfinished
+comparison. A future encoder replacement should demonstrate better candidate
+coverage on new queries under the same representation and evaluation policy.
+
+### Hybrid retrieval instead of embeddings alone or keywords alone
+
+Embeddings help with paraphrases but do not reliably enforce logical negation.
+Lexical matching is useful for brands, named dishes and exact ingredients but
+can miss indirect requests. Combining their rankings preserves complementary
+matches. The lexical-only experiment was substantially weaker on the evaluated
+indirect queries, so it remains a candidate source rather than the final method.
+
+The lean hybrid also lost to the existing control. This cautions against removing
+all query and attribute handling in the name of simplicity. However, that
+experiment changed several components together; it cannot prove that every
+existing compatibility rule is necessary.
+
+### A small contextual reranker instead of more ranking rules
+
+The observed errors often concerned the relationship between the complete query
+and product identity, rather than an absent synonym. A bounded language-model
+reranker can read those relationships directly, while candidate retrieval and
+source verification constrain its role.
+
+GPT-4.1-mini was the inexpensive model tested for this stage. Restricting it to
+24 candidates limits prompt size and cost compared with reading the whole
+catalog. There was no controlled model-family sweep proving mini superior to
+nano, GPT-4.1 or a dedicated cross-encoder. Its inclusion is justified by the
+measured architecture comparison, with the trade-offs below kept explicit.
+
+### Exact search and SQLite instead of a distributed search stack
+
+At 4,997 offers, a normalized vector matrix and in-process lexical indexes are
+sufficient for this prototype. An approximate nearest-neighbor service would
+introduce deployment and recall trade-offs without a demonstrated need. SQLite
+provides persistent caching and API accounting on one host. These choices make
+the assignment easier to reproduce; they are not a claim that this deployment
+architecture is sufficient for portfolio-scale traffic.
+
+Images, co-purchases and historical search terms are omitted because no
+incremental retrieval benefit was demonstrated. Behavioral fields can reinforce
+past exposure, while images cannot establish hidden ingredients. Fine-tuning is
+also deferred: the current sparse, model-generated labels could teach annotation
+artifacts as readily as better relevance.
+
+## 4. Evaluation without predefined ground truth
+
+The evaluation pools top-five candidates from competing systems and judges them
+under a shared rubric. Grades distinguish irrelevant, partial, useful and strong
+matches, with explicit treatment of product identity, requirements and missing
+evidence. All reported relevance labels are model judgments.
+
+The architecture comparison uses 30 development queries and a shared 390-pair
+pool. Compatible historical labels are preserved; new candidates receive new
+judgments. After the methods were frozen, a separate model authored 12 fresh
+synthetic queries without seeing the catalog, previous queries or rankings.
+Their shared pool contains 152 query-product pairs, judged primarily by GPT-4.1,
+separate from the GPT-4.1-mini reranker. Independent checks assess grader
+consistency. [Protocol and detailed evidence](review/REASSESSMENT.md).
+
+The metrics answer different questions:
+
+- **nDCG@5:** how well the five results are ordered relative to the judged pool's
+  ideal ranking. It is not accuracy or a full-catalog relevance measure.
+- **Success@5:** the fraction of queries with at least one useful result
+  (grade at least 2) among the first five.
+- **MRR@5:** how early the first useful result appears.
+- **Mandatory contradictions:** model-judged result positions conflicting with
+  mandatory requirements, which can concern identity or attributes, not only ingredients.
+- **Returned coverage:** whether five results were produced; this does not imply
+  five relevant products or establish catalog recall.
+
+### Results
+
+| Method | Development nDCG@5 | Fresh nDCG@5 | Fresh Success@5 | Fresh mandatory conflicts |
+| --- | ---: | ---: | ---: | ---: |
+| Field lexical | .434 | .646 | 9/12 | 9/60 |
+| Lean hybrid | .530 | .706 | 9/12 | 10/60 |
+| Constraint-aware control | .654 | .774 | 10/12 | 2/60 |
+| Contextual reranker | **.787** | **.799** | **11/12** | 4/60 |
+
+nDCG is defined for 29 development queries and 11 fresh queries; queries with
+zero pooled ideal gain remain in Success and MRR. Compare methods within a
+column. The two datasets have different pools and evaluation policies, so the
+columns do not describe improvement over time.
+
+Contextual ranking improves the development point estimate, primarily through
+better product selection. On the fresh set, its nDCG advantage is only .024,
+with a paired 95% interval of **[-.095, +.165]**. Fresh MRR is slightly lower
+(.819 versus .833), and mandatory conflicts increase. One disputed exclusion
+judgment infers lactose status from condensed milk rather than an explicit
+lactose statement; the original label is retained and the uncertainty disclosed.
+
+Consequently, the contextual method is submitted as an explicit quality option,
+while the default remains unchanged. It is not a demonstrated universal winner.
+The fresh set is small and synthetic; agreement between graders is not customer
+utility. The fresh query-card policy was also amended after a query-only pilot
+to allow open-ended discovery without an invented mandatory product identity.
+The amendment is versioned, and rankings did not change in response.
+
+The old final 70 queries were already evaluated and were not reused as an
+untouched holdout for tuning this architecture. Exporting predictions for all
+100 assignment queries is separate from making a new held-out quality claim.
+
+## 5. Runtime, reliability and production limits
+
+| Measurement | Observed result | Scope |
+| --- | --- | --- |
+| Local control top-100 generation | 26.5 ms median | Cached interpretations and query embeddings; not full contextual latency. |
+| First API reranking request | 1.6 s median; about 2.0 s p95 | 30 development requests, including validation and ledger settlement; additional to candidate generation. |
+| Reranking cost | About $0.0016/query | Confirmed ranking calls; uncached query interpretation can add cost. |
+| Cumulative API accounting | $2.623069 against a $4.50 ceiling | Includes prior experiments, failed/invalid calls and conservative uncertain reservations. |
+
+These measurements do not establish production throughput, an end-to-end SLA or
+a conversion uplift. In particular, cached embedding lookup and fresh embedding
+inference are different workloads.
+
+Model assets, source snapshots, representations and releases are fingerprinted.
+Embedding caches include model/representation identity; reranking caches include
+the actual candidate packet and prompt contract. Cached experiment rankings were
+imported only after verifying exact serving inputs. The application reproduced
+all 42 measured contextual rankings and matched all 500 submitted result IDs
+through actual HTTP requests.
+
+Remote calls require explicit `--allow-api` and reserve against the persistent
+cumulative ledger before transmission. Contextual mode uses `OPENAI_NEW_KEY`
+only at the official OpenAI endpoint. Credentials are excluded from version
+control and logs. Failed calls produce explicit errors; the application does
+not silently switch providers or ranking methods. The localhost service reuses
+loaded indexes and applies admission control rather than permitting unbounded
+concurrent inference.
+
+Before production, the most valuable additions are live merchant/location/stock
+eligibility, current option data and source freshness. Broader untouched query
+evaluation should then determine when reranking earns its latency and cost.
+Shared accounting, service replication, larger indexes or a distilled reranker
+should follow measured traffic and catalog bottlenecks. No such scale benefit is
+claimed from this local prototype.
+
+## 6. Running and reproducing the submission
+
+Use Python 3.12+ and place the supplied `5k_items_curated.csv` and `queries.csv`
+in the repository root. Raw inputs, model weights, local caches and credentials
+are intentionally untracked.
 
 ```powershell
 python -m venv .venv
@@ -20,396 +371,61 @@ python -m pip install --no-deps -e .
 python -m prosus_search setup --local-model
 python -m prosus_search build --backend local
 python -m prosus_search search "pizza de queijo" --mode semantic-local --json
-# Optional quality mode after setting OPENAI_NEW_KEY in .env:
+```
+
+The lock file records the tested Windows environment. On macOS/Linux activate
+with `source .venv/bin/activate`; `pip install -e '.[local,dev]'` is the alternative
+dependency installation. Initial model setup downloads approximately 490 MB.
+The fresh artifact rebuild was verified using existing assets and caches, not
+an entirely fresh network installation.
+
+For the submitted contextual mode, set a normal OpenAI key as `OPENAI_NEW_KEY`
+in ignored root `.env`, then run:
+
+```powershell
 python -m prosus_search search "hamburguer sem queijo" --mode contextual --allow-api --json
+python -m prosus_search serve --mode contextual --port 8766 --allow-api
 ```
 
-Requires the supplied `5k_items_curated.csv` and `queries.csv` in the repository
-root and Python 3.12+. On macOS/Linux use `source .venv/bin/activate`.
-The first setup downloads approximately 490 MB of pinned model assets. The guide
-explains the Windows lock file, alternative dependency installation and caches.
+The service binds to localhost and exposes `/health` and
+`/search?q=hamburguer%20sem%20queijo&k=5`. Contextual mode supports `k=1..5`.
+The `constraint-hybrid` mode is the fast control; `semantic-local` is the frozen
+offline default and does not guarantee ingredient filtering. Simple or cached
+constraint queries can work offline; uncached complex interpretation requires
+the appropriate explicit API route. [Operational details](review/SUBMISSION.md).
 
-**Verified:** 513 tests passed, all 42 measured quality rankings replayed exactly,
-and the HTTP service matched all 500 submitted result IDs. Fresh synthetic
-nDCG@5 is .799 versus .774 for the constraint-aware control; the confidence
-interval includes zero. Results use model judgments, not human ground truth.
-Quality mode adds about 1.6 s of first-call API ranking latency. The manifest records
-the current cumulative ledger; older sections below preserve accounting snapshots.
-
-The remainder documents prior experiments and their historical evidence.
-
-Type a Portuguese query and choose how many results to return. The system embeds
-the query, scores all **4,997 distinct catalog items**, and returns the top `k`.
-Product vectors are prepared once. Search never calls a relevance judge.
-
-The latest [architecture reassessment](review/REASSESSMENT.md) compares field
-lexical retrieval, a lean hybrid and contextual shortlist ranking against the
-constraint-aware control. Reranking helped development queries, but its gain on
-12 fresh synthetic queries was uncertain and added latency. The measured
-contextual candidate is now an explicit serving option.
-The frozen default is unchanged. The current cumulative ledger is in the
-[submission manifest](review/submission/manifest.json); earlier amounts are snapshots.
-
-`--mode constraint-hybrid` adds explicit ingredient-contradiction filtering before
-hybrid candidate selection. Unspecified ingredients remain eligible. Supported
-absence gives a bounded ranking advantage; optional toppings and historical
-customizations do not establish default ingredients. Cheese varieties, negation,
-included sides and exact source spans are handled by a deliberately bounded
-ingredient vocabulary. Missing facts remain unknown; dietary safety is not
-certified. This experimental mode does not change the frozen default.
+Replay the saved comparisons and verify the submission without paid judging:
 
 ```powershell
-python -m prosus_search search "hamburguer sem queijo" --mode constraint-hybrid --json
-python -m prosus_search serve --mode constraint-hybrid --port 8765
-```
-
-The reusable localhost service exposes `/health` and
-`/search?q=hamburguer%20sem%20queijo&k=5`. Remote API calls are disabled in the
-server. Supported simple requests and cached complex interpretations work offline;
-uncached complex requests return an explicit error. CLI remote interpretation
-requires `--allow-api` and the existing cumulative budget ledger.
-See [the acceptance and evaluation protocol](review/CONSTRAINT-SEARCH.md).
-
-Constraint-hybrid status (2026-11-04): [all 500 predictions](review/evidence/constraint-top5-100.csv)
-are exported and 92 focused tests pass. The complete 578-pair development pool
-gives nDCG@5 .644 versus .660 for grounded-local; no reliable gain is established.
-Fresh judging is complete: 274 pooled pairs over 30 new synthetic queries plus
-20 independent checks. Constraint-hybrid / grounded-local / semantic-local
-nDCG@5 is **.778 / .702 / .669** on 25 queries with defined nDCG; Success@5 is
-**20 / 17 / 17 out of 30**. The paired candidate-versus-grounded 95% interval
-includes zero; the default remains unchanged. After gateway HTTP403 failures,
-the user-authorized official OpenAI fallback completed the missing judgments.
-Cumulative conservative API spend is **$1.804028 / $4.50**. All 500 exported IDs
-also match actual HTTP serving. See [final evidence](review/evidence/constraint-final30.json)
-and the linked report for model-label limitations, routing provenance and replay.
-Historical experiment sections below retain their original accounting snapshots.
-
-An experimental grounded method is explicitly selectable with
-`python -m prosus_search search "hambúrguer sem queijo para viagem" --mode grounded-local --allow-api --json`.
-It retains E5-small, builds separate source-backed product text, retrieves dense
-and lexical candidates, and applies a small compatibility scorer. Query-only
-semantic interpretation uses the budgeted gateway and persists validated plans;
-cached queries work offline without `--allow-api`. An uncached query fails clearly
-when API calls are disabled, rather than silently using a different parser.
-Historical customization records are kept separately and establish neither base
-ingredients nor current availability. The first construction encodes the catalog;
-later constructions validate and reuse that matrix. This mode does not change
-the incumbent or current-release pointer. Detailed results and limitations are
-recorded in [the completed semantic evaluation](review/GROUNDED-SEMANTIC.md).
-
-`--mode grounded-facets` selects an additional experimental source-facet matcher
-over the same E5-small candidate pool. It preserves multiword identity modifiers,
-exact source evidence, component scope, unknowns and conflicts; compatibility
-tiers precede retrieval similarity. A fully consumed local grammar handles
-simple type/ingredient requests without an API; complex requests retain the
-existing semantic interpreter (cached plans work offline; uncached semantic
-requests require `--allow-api`). It does not use the remote reranker.
-
-The complete **532-pair** frozen-v5 comparison covers 30 development queries,
-29 with defined nDCG. Incumbent/grounded-local/selected-facets nDCG is
-**.540/.727/.737**, Success **7/9/9 out of 30**, MRR **.192/.283/.251**.
-Facets reduce hard-attribute contradictions **17/125 to 12/125** compared with
-grounded-local, while identity contradictions increase **35/150 to 37/150**.
-The paired facet nDCG delta is +.0106, 95% interval [-.0502,.0728]; no reliable
-gain is established. These are LLM judgments, not human ground truth. The
-initial version and the single scoring refinement are preserved, including
-regressions; the corrected second version is the experimental selection.
-Neither the incumbent nor the default was changed. Do not claim perfection,
-production readiness, full-catalog recall or a demonstrated overall improvement.
-
-[Final metrics and selection](review/evidence/grounded-facets.json),
-[ID-based judgments and repeat labels](review/evidence/grounded-facets-judgments.json),
-[serving/source integrity receipt](review/evidence/facets-integration.json),
-[initial version](review/evidence/facets-v1.json),
-[corrected version before common-pool expansion](review/evidence/facets-v2.json),
-[rejected scoring refinement](review/evidence/facets-v3.json).
-
-All 532 pairs are judged: 407 frozen v5 labels and 125 budgeted gateway labels
-(73 previously obtained plus 52 new pairs). The final preselected 20-pair
-independent panel agrees on all exact and binary grades; its small size and
-mostly reused primary pairs do not establish human accuracy. The old final
-70 queries and sealed challenge were not opened for this experiment.
-
-Representative outcomes relative to grounded-local: q0074 adds a grade-3 fried
-tilapia portion at rank three; q0034 moves explicitly Lebanese coalhada ahead
-of partial alternatives and removes Egyptian falafel from the top five; q0085
-regresses despite preserving wing products at the first two ranks, because
-other chicken dishes still fail the requested cut/style. Cuisine/form evidence
-and unknowns remain imperfect. Bounded caches reuse immutable query facets and
-normalization. All 30 development rankings replay exactly after memoization;
-one sequential E5 inference-bypass pass with cached semantic plans observed
-27.2 ms median and 35.6 ms p95. A separate six-query local-grammar check needed
-no API. These are not genuine-miss/load capacity or production SLA measurements.
-Complex new semantic queries still incur remote interpretation latency.
-Conservative cumulative API accounting is
-**$1.057273**, including uncertain reservations, below the unchanged $4.50 cap.
-No unit tests or full suite were added/run; actual serving and exact offline
-metric replay were verified. Unrelated working files were preserved.
-
-```powershell
-python scripts/score_grounded.py --facets
-python scripts/complete_grounded.py --folder work/grounded-facets
-python scripts/score_grounded.py --replay review/evidence/grounded-facets.json
-python -m prosus_search search "hamburguer sem cheddar com bacon" --mode grounded-facets --json
-```
-
-The first two commands regenerate current serving rankings and obtain any missing
-blinded judgments using the existing ignored `.env` loader and cumulative ledger;
-saved earlier experiment checkpoints under `work/` retain the expanded controls.
-The `--replay` command needs the committed evidence only and verifies the final
-metrics plus independent-label sensitivity without inference, credentials or API.
-
-**Working now:** offline multilingual E5, BM25 and their RRF combination;
-100 queries × five results × three local runs. The independent review implements
-a hosted-small comparison option and runs blinded evaluation through the assignment gateway;
-the full hosted embedding experiment was blocked by access denial.
-See the [review report](review/REPORT.md) for measured quality, coverage, spending
-and limitations. Semantic-local remains the incumbent until frozen development
-selection justifies a change; passing tests is not evidence of search quality.
-
-**Historical final review:** operational prototype, quality targets unmet. Frozen final
-E5 estimates are nDCG@5 **0.695**, Success@5 **47.1%**, MRR@5 **0.381**, and mandatory
-contradiction exposure **30.3%**. All 755 pooled pairs are judged after explicit
-adjudication, but repeat checks remain incomplete and no human calibration was
-available. No method earned promotion on development. The 180-test suite, fresh
-inference and exact 1,500-row replay pass. Conservative API spending is
-**$0.622962**, including uncertain calls; the existing $4.50 ceiling is unchanged.
-
-**Current development cycle:** the frozen v5 interpretation evaluation is complete:
-527 reading/item judgments plus40 independent repeats, with no retained ranking
-improvement. Incumbent primary-reading nDCG is **.590**, Success **7/30**;
-these changed judgments are not a change in rankings or comparable gains over
-the historical protocol. [Current decision](review/INTENT-DECISION-v5.md) and
-[every-query diagnosis](review/V5-QUERY-DIAGNOSIS.md) show limitations and alternate
-readings. New field/fusion experiments remain separate until fully evaluated.
-Cumulative project API accounting is **$0.691229**, including uncertainty.
-The original final set is already used; new experiments do not treat it as untouched.
-
-Loaded snapshots now isolate metadata, vectors, configuration and model identity.
-The repaired service passes417 tests and the fresh-inference audit. Its latest
-60-second, four-client genuine-miss test measures **62.76QPS**, **109.20ms p95**,
-zero errors and0.834GiB loaded memory; these are local library measurements.
-See [pipeline map](review/PIPELINE-AUDIT-v6.md), [measured runtime](review/PERFORMANCE-v6.md)
-and [candidate/abstention limits](review/CANDIDATES-AND-ABSTENTION-v6.md).
-[Acceptance criteria](review/ACCEPTANCE-v2.md), [experiment decisions](review/EXPERIMENTS-v2.md),
-[current progress](review/PROGRESS.md), [production path](review/PRODUCTION-PATH-v2.md)
-and [cost boundaries](review/COST-v2.md) distinguish demonstrated results from
-remaining work. Ranking relevance targets remain unmet.
-
-[Ranked results](review/evidence/selected-top5.csv) · [Independent review](review/REPORT.md) ·
-[Historical five-slide presentation](review/presentation/independent-review.pptx) ·
-[Evaluation protocol](review/EVALUATION.md)
-
-## Quick start
-
-Requires Python 3.12+, network access for setup, and the supplied
-`5k_items_curated.csv` and `queries.csv` in the repository root. Raw inputs, model
-weights, caches and detailed outputs are excluded from Git because redistribution
-permission is unconfirmed. Submitted result CSVs contain stable query/item IDs and
-scores; join the current submission export to the supplied inputs for full text.
-Some historical evidence CSVs also contain query text and product names; they are
-not the minimal submission export linked at the top.
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements-lock.txt
-python -m pip install --no-deps -e .
-python -m prosus_search setup --local-model
-python -m prosus_search preflight
-$build = python -m prosus_search build --backend local | ConvertFrom-Json
-python -m prosus_search search "pizza de queijo" --k 5
-```
-
-On macOS/Linux activate with `source .venv/bin/activate`; use the same Python
-commands and copy the returned `build_manifest` path where needed. The lock file
-records the tested Windows/Python 3.12 environment. The repository includes an
-Ubuntu CI workflow; this review ran locally on Windows.
-Alternatively use `pip install -e '.[local,dev]'` and record resolved
-versions. Setup downloads approximately 490 MB. Subsequent local operation needs
-no internet or API key.
-
-```powershell
-python -m prosus_search search "prato para compartilhar" --k 10 --json
-python -m prosus_search search "pizza de queijo" --mode hybrid-local --k 5
-python -m prosus_search search "pizza de queijo" --mode lexical --k 5
-$run = python -m prosus_search benchmark --build $build.build_manifest | ConvertFrom-Json
-$benchmark = Join-Path $run.output_directory 'benchmark.json'
-python -m prosus_search evaluate --benchmark $benchmark --dry-run
-python -m prosus_search export --benchmark $benchmark --run semantic-local --output results/selected-top5.csv
+python scripts/reassessment_lab.py replay
+python scripts/reassessment_open_intent.py --replay
+python scripts/verify_submission.py
 python -m prosus_search budget
 ```
 
-`k` defaults to five. Semantic/lexical accept `1..catalog size`; interactive hybrid
-accepts up to 100 because its candidate depth is fixed. Scores are cosine, BM25 or
-RRF ranking signals, **not probabilities**, and differ across score types. No
-relevance cutoff is imposed: unsupported queries still receive ranked candidates.
+To intentionally regenerate all predictions after setup, use
+`python scripts/prepare_quality_submission.py --export --allow-api`. This can
+make paid calls and replace export receipts; preserve the submitted files first.
+Fresh model outputs need not be byte-identical to the committed predictions.
 
-For repeated requests, reuse the loaded service:
+The last full tracked test run passed **513 tests**. Verification also covers
+ID/schema validation, ingredient hierarchy, negation, optional additions,
+included sides, unspecified-product retention, budget behavior, cached parity
+and actual uncached API requests. [Verification receipts](review/SUBMISSION.md#what-is-verified).
 
-```python
-from prosus_search.service import SearchService
-search = SearchService(mode="semantic-local")
-results = search.search("sopa para o inverno", k=5)
-for item in results["results"]:
-    print(item["rank"], item["name"], item["item_id"])
-```
+### Code organization
 
-The convenience function `prosus_search.service.search(query, k=5)` also works;
-creating a fresh service for every request repeats loading. A service admits at
-most four simultaneous calls by default and raises `SearchBusyError` when full.
-Callers should use bounded backoff or an explicit overload response. One loaded
-service completed 5,418 genuine query-cache misses, including SQLite persistence,
-in 60.03 seconds: **90.26 QPS, 92.72 ms p95, 141.55 ms p99**, with zero errors.
-Loaded RSS was 0.829 GiB and peak RSS 1.181 GiB. A separate mixed-load run offered
-102 requests/second and rejected 1.60%; saturation and rejected work must be
-reported with accepted-request latency. These host-local measurements use short
-development queries plus unique suffixes and do not establish production API
-capacity. See [performance protocol and evidence](review/PERFORMANCE-v2.md).
+| Module | Responsibility |
+| --- | --- |
+| [`catalog.py`](src/prosus_search/catalog.py), [`representation.py`](src/prosus_search/representation.py) | Validated ingestion, provenance and the frozen baseline text representation. |
+| [`local_embeddings.py`](src/prosus_search/local_embeddings.py), [`retrieval.py`](src/prosus_search/retrieval.py) | Pinned E5 inference, lexical indexes, exact scoring and stable ranking. |
+| [`grounded.py`](src/prosus_search/grounded.py), [`understanding.py`](src/prosus_search/understanding.py) | Source-backed product representation and query interpretation. |
+| [`constraints.py`](src/prosus_search/constraints.py), [`facets.py`](src/prosus_search/facets.py) | Ingredient evidence, relationships, component scope and compatibility signals. |
+| [`quality.py`](src/prosus_search/quality.py) | Candidate union, official API routing, contextual reranking and final verification. |
+| [`store.py`](src/prosus_search/store.py), [`artifacts.py`](src/prosus_search/artifacts.py) | Persistent caches, budget accounting and versioned artifacts. |
+| [`cli.py`](src/prosus_search/cli.py), [`server.py`](src/prosus_search/server.py) | Command-line and localhost interfaces. |
 
-The library also accepts a validated, expiring eligibility snapshot and filters
-before candidate selection. Empty or small eligible sets return fewer than `k`
-results. A marketplace backend must supply authoritative stock/geography/merchant
-eligibility and authenticate its context; these feeds are proposed production
-work. See [the demonstrated eligibility contract](review/ELIGIBILITY-v2.md).
-
-## Preparation and comparison
-
-Strict CSV/JSON validation preserves provenance and collapses only identical
-repeated item IDs. Separate merchant offers remain distinct. Shared text includes
-name, category, readable taxonomy, description and declared portion tags. Missing
-facts stay missing. Dietary flags, price, profiles and images do not affect
-retrieval text. Dense text preserves accents; BM25 folds accents/case while
-retaining negation and numbers. Oversized inputs fail rather than truncate.
-
-The local model is the author's full-precision ONNX export of
-[intfloat/multilingual-e5-small](https://huggingface.co/intfloat/multilingual-e5-small),
-MIT license, commit `614241f622f53c4eeff9890bdc4f31cfecc418b3`. Verified files,
-required `query:`/`passage:` prefixes, attention-mask mean pooling and L2
-normalization produce 384-dimensional vectors. Search never downloads files.
-
-Exact NumPy scoring uses stable item-ID ties. Hybrid uses equal-weight RRF,
-`k=60`, top 100 per branch, positive lexical matches only. Failures never silently
-fall back to another retrieval method.
-
-`config.toml` controls paths, model spaces, initial parameters and budgets; unknown
-keys fail. Paths resolve beside the file. Fixed benchmark builds verify input
-hashes and the grouped split. New data requires versioned hashes and an appropriate
-evaluation protocol. Lexical search uses the same immutable current snapshot;
-before the first build it can ingest raw CSV. Changes require a rebuilt release.
-`--release` pins interactive search to a snapshot, including lexical mode; pair it
-with an explicit `--mode` when pinning a different model family from the current default.
-
-## Hosted experiments and evaluation
-
-Paste your API key after `OPENAI_API_KEY=` in the repository-root `.env` file
-(copy `.env.example` if needed), or set `OPENAI_API_KEY` in the environment.
-Configuration loading reads only that key from `.env` beside `config.toml`;
-an existing environment variable takes precedence. `.env` is ignored by Git,
-and its contents never enter saved configuration or manifests. Never put keys
-in tracked files, logs, saved terminal commands or chat. Placeholder keys are
-rejected. Cached replay is the default; paid requests require `--allow-api`.
-
-The supplied key belongs to **`https://lcm-litellm.prosus.com/`**, configured in
-`[api].base_url`. Gateway model names include `openai/`. Do not send that key to
-the direct OpenAI endpoint. The review verified root embedding calls and current
-judge inference; `/v1/models` lists models but can include deprecated entries.
-The originally suggested nano model rejected inference as deprecated. The
-versioned evaluator uses `openai/gpt-6-luna` and independent `openai/gpt-6-sol`
-checks with the Responses API. See the protocol for conservative prices and
-pilot corrections. Explicit endpoint/model/cache hashes prevent accidental reuse
-across providers.
-
-```powershell
-$hosted = python -m prosus_search build --backend comparison --allow-api | ConvertFrom-Json
-$comparison = python -m prosus_search benchmark --build $hosted.build_manifest | ConvertFrom-Json
-$comparisonBenchmark = Join-Path $comparison.output_directory 'benchmark.json'
-python -m prosus_search evaluate --benchmark $comparisonBenchmark --pilot-only --allow-api
-python -m prosus_search evaluate --benchmark $comparisonBenchmark --judge-workers 4 --allow-api
-```
-
-The optional comparison includes BM25, E5, hosted-small and each model's hybrid,
-using common evidence. **The review's hosted-small catalog build was blocked by
-gateway access denial after successful small probes; its partial index was not
-published or evaluated.** The judged review therefore compares the three complete
-local runs. `--backend local` needs no API; `--backend hosted` retains the separate
-small/large experiment. An incomplete build never changes the serving pointer.
-Hosted batches use 32 inputs; live failures remain charged conservatively.
-Fixtures never become dataset labels.
-
-Evaluation pools top-five candidates, hides system/rank/score, creates query-only
-intent cards and requests pointwise Portuguese source-backed grades. Validation
-checks exact quotes/scalars, requirement IDs and grade caps. Missing evidence
-differs from contradiction. Cached outputs and distinct replicate IDs support
-bounded repeat, equivalent-prompt, grader and independent intent-card checks.
-One retry per primary assessment is budgeted. Exhausted invalid primary outputs
-receive a separately recorded independent-model adjudication, with at most two
-attempts. Originals remain intact, primary validity is reported separately, and
-unresolved failures remain missing. Diagnostic arms are never adjudicated.
-
-The frozen split has **30 development / 70 final queries**, grouped by intent.
-Final judging requires an explicit end-of-iteration decision and frozen selection.
-The CLI gate protects the holdout; it is procedural, not a security boundary or
-a renewed approval request. The review records whether final judging was released.
-Human calibration has not been performed.
-
-With valid labels, reports mark nDCG@5, Success@5, MRR@5 and constraint rates as
-**LLM-judged**. Incomplete pools use the common complete-query subset and keep
-full-split metrics null. Zero ideal gain gives undefined nDCG with its denominator;
-those queries remain in Success/MRR. No zero imputation, full-catalog recall claim or promotion
-from incomplete evidence. Bootstrap intervals condition on automated labels and
-do not measure judge accuracy. Frozen selection rules retain simplicity when
-differences are inconclusive; BM25 is eligible to win. See the
-[review protocol](review/EVALUATION.md).
-
-The persistent ledger reserves before requests and includes pending/uncertain
-charges. It stops at **$4.50**, leaving $0.50 untouched: $0.50 embeddings, $1.40
-development, $0.85 final, $1 Round 4 and $0.75 recovery. SDK retries are disabled;
-application retries reserve again. Up to four independent judge calls can overlap;
-per-key locks prevent duplicate submissions and SQLite reservations enforce the
-same shared ceiling. Never delete the ledger to bypass limits.
-The ledger cannot observe unrelated account spending. Verify tariffs and remaining
-credit before paid execution. The user confirmed the key was unused with $5
-available and standard rates before the review's paid calls; the provider's budget
-route itself is blocked. Reported totals include failed/uncertain requests.
-
-## Replay and tests
-
-```powershell
-python -m pytest -q
-python scripts/measure_local.py
-python scripts/verify_local.py --build $build.build_manifest --benchmark $benchmark
-python scripts/replay_benchmark.py --build $build.build_manifest --reference $benchmark
-```
-
-Tests cover parsing, alignment, scoring/fusion, accounting, interrupted publishing,
-evidence validation, metrics and end-to-end benchmark mechanics using synthetic
-fixtures. They need no raw data, pretrained downloads or paid APIs.
-
-`work/state.sqlite3` stores caches and the ledger. Immutable releases under
-`work/artifacts/releases/<hash>/` contain evidence, ordered IDs, vectors and
-checksums. Build manifests record input/config/code/package versions. Each
-`outputs/<run>/` contains top-five CSV/JSONL, top-100 diagnostics, selected results
-and measurements. Replay takes an explicit build path rather than a mutable
-current pointer. Keep detailed outputs and judgment payloads private.
-
-Changed text or portion tags re-embed affected items. Excluded-metadata updates
-reuse vectors in a new evidence snapshot; deletions disappear from new releases.
-Model/prefix/epoch changes create separate cache spaces. Saved artifacts replay
-results; hosted aliases cannot guarantee identical fresh inference. An incomplete
-build never replaces the current pointer. Missing assets require `setup`; corrupt
-releases require rebuilding; hosted cache misses require explicit API access.
-
-## Scope and delivery
-
-Better discovery and cold-start merchant exposure are business hypotheses;
-conversion and fairness are unmeasured. Production geography, inventory, eligibility
-and trusted dietary facts require authoritative feeds. Consider ANN after measured
-latency/memory pressure; consider reranking only when judged candidates are useful
-but misordered. No server, vector database or UI is needed for this benchmark.
-
-The independent review, protocol amendments, measured figures and durable
-[progress record](review/PROGRESS.md) live outside `docs/`, as requested. The
-latest user instruction authorizes implementation and iteration without the
-earlier round gates. Nothing was published or pushed. The assignment asks for
-the GitHub link at least **one day before the interview**; its date was not provided.
+`review/submission/` contains the selected deliverables. Other reports and
+evaluation artifacts under `review/`, `protocols/` and `results/` preserve the
+experimental history; their older costs, policies and defaults are snapshots,
+not additional current submission claims.
