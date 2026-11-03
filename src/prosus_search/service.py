@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from threading import BoundedSemaphore
 import time
 
 from .artifacts import load_current, load_release
@@ -12,6 +13,10 @@ from .representation import prepare_catalog, prepare_query
 from .retrieval import SearchEngine
 
 
+class SearchBusyError(RuntimeError):
+    """Admission limit reached; callers should retry later, not grow a queue."""
+
+
 class SearchService:
     """Reusable process-local search instance; no judge or rewrite in this path.
 
@@ -20,14 +25,25 @@ class SearchService:
     """
 
     def __init__(self, config: Config | str = "config.toml", *, mode: str | None = None,
-                 release_id: str | None = None, allow_api: bool = False):
+                 release_id: str | None = None, allow_api: bool = False, max_concurrency: int = 4):
         self.config = load_config(config) if isinstance(config, str) else config
+        if type(max_concurrency) is not int or max_concurrency < 1:
+            raise ConfigError("max_concurrency must be a positive integer")
+        self._admission = BoundedSemaphore(max_concurrency)
         self.counter = token_counter(self.config)
         self.release_id = release_id
         self.embedder = None
+        pointer = None
+        if mode is None or release_id is None and (self.config.resolve("artifacts") / "current.json").exists():
+            pointer = load_current(self.config.resolve("artifacts"))
+        mode = mode or pointer["default_mode"]
         if mode == "lexical":
-            if release_id:
-                release = load_release(self.config.resolve("artifacts"), release_id)
+            if not self.release_id and pointer:
+                self.release_id = pointer["models"][sorted(pointer["models"])[0]]
+            if self.release_id:
+                release = load_release(self.config.resolve("artifacts"), self.release_id)
+                if release.manifest["metadata"].get("retrieval") != self.config["retrieval"]:
+                    raise ConfigError("Retrieval settings differ from release; record a versioned build before changing them")
                 prepared = restored_prepared(release)
             else:
                 catalog = load_catalog(self.config.resolve("catalog"))
@@ -36,10 +52,9 @@ class SearchService:
             self.engine = SearchEngine(prepared, **self.config["retrieval"])
             self.family, self.mode, self.retrieval_mode = None, "lexical", "lexical"
             return
-        pointer = None
-        if mode is None or release_id is None:
+        if release_id is None and pointer is None:
             pointer = load_current(self.config.resolve("artifacts"))
-        self.mode = mode or pointer["default_mode"]
+        self.mode = mode
         parts = self.mode.split("-", 1)
         if len(parts) != 2 or parts[0] not in {"semantic", "hybrid"} or parts[1] not in {"local", "small", "large"}:
             raise ConfigError("Use lexical, semantic-{local,small,large}, or hybrid-{local,small,large}")
@@ -56,6 +71,14 @@ class SearchService:
         self.embedder = make_embedder(self.config, open_store(self.config), self.family, self.counter, allow_api=allow_api)
 
     def search(self, query: str, k: int = 5, *, bypass_query_cache: bool = False) -> dict:
+        if not self._admission.acquire(blocking=False):
+            raise SearchBusyError("Search concurrency limit reached; retry later with bounded backoff")
+        try:
+            return self._search(query, k, bypass_query_cache=bypass_query_cache)
+        finally:
+            self._admission.release()
+
+    def _search(self, query: str, k: int, *, bypass_query_cache: bool) -> dict:
         start = time.perf_counter()
         if type(k) is not int or not 1 <= k <= len(self.engine.ids):
             raise ConfigError(f"k must be an integer between 1 and {len(self.engine.ids)}")

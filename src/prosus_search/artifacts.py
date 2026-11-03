@@ -215,10 +215,20 @@ def load_release(root: str | Path, release_id: str, expected_model: str | None =
     return release
 
 
+def _default_release_key(models: Mapping[str, str], mode: str) -> str:
+    if not models:
+        raise ArtifactError("Current bundle must contain its default search mode")
+    if mode == "lexical":
+        return sorted(models)[0]
+    key = "semantic-" + mode.split("-", 1)[1] if isinstance(mode, str) and mode.startswith("hybrid-") else mode
+    if key not in models:
+        raise ArtifactError("Current bundle must contain its default search mode")
+    return key
+
+
 def publish_current(root: str | Path, model_release_ids: Mapping[str, str], default_mode: str = "semantic-small") -> dict[str, Any]:
     """Atomically advance a complete compatible bundle; never overwrite matrices."""
-    if not model_release_ids or default_mode not in model_release_ids:
-        raise ArtifactError("Current bundle must contain its default search mode")
+    _default_release_key(model_release_ids, default_mode)
     releases = {key: load_release(root, release_id) for key, release_id in model_release_ids.items()}
     signatures = {(release.manifest["source_hash"], release.manifest["prepared_hash"], release.manifest["representation_version"],
                    release.manifest["ordered_ids_hash"]) for release in releases.values()}
@@ -239,6 +249,5 @@ def load_current(root: str | Path) -> dict[str, Any]:
     pointer = _read_json(Path(root) / "current.json")
     if not isinstance(pointer, dict) or pointer.get("schema_version") != 1 or not isinstance(pointer.get("models"), dict):
         raise ArtifactError("Current release pointer is invalid")
-    if pointer.get("default_mode") not in pointer["models"]:
-        raise ArtifactError("Current release pointer lacks its default mode")
+    _default_release_key(pointer["models"], pointer.get("default_mode"))
     return pointer

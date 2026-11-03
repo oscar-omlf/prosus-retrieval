@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import re
 import time
+from threading import Lock
 from typing import Any, Sequence
 import uuid
 
@@ -197,10 +198,16 @@ class LocalEmbeddingClient:
         self.batch_size, self.intra_op_threads = batch_size, intra_op_threads
         self._tokenizer = None
         self._session = None
+        self._initialization_lock = Lock()
         self._pad_id: int | None = None
         self.last_run: dict[str, Any] = {}
 
     def _get_tokenizer(self):
+        # Concurrent first misses must not publish duplicate mutable tokenizers.
+        with self._initialization_lock:
+            return self._load_tokenizer()
+
+    def _load_tokenizer(self):
         if self._tokenizer is None:
             try:
                 from tokenizers import Tokenizer
@@ -222,6 +229,12 @@ class LocalEmbeddingClient:
         return self._tokenizer
 
     def _get_session(self):
+        # Loading E5 twice during a cold burst doubles ~1 GiB residency. Inference
+        # itself remains concurrent after initialization, using one ORT session.
+        with self._initialization_lock:
+            return self._load_session()
+
+    def _load_session(self):
         if self._session is None:
             try:
                 import onnxruntime as ort
