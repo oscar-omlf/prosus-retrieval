@@ -4,6 +4,26 @@ Type a Portuguese query and choose how many results to return. The system embeds
 the query, scores all **4,997 distinct catalog items**, and returns the top `k`.
 Product vectors are prepared once. Search never calls a relevance judge.
 
+`--mode constraint-hybrid` adds explicit ingredient-contradiction filtering before
+hybrid candidate selection. Unspecified ingredients remain eligible. Supported
+absence gives a bounded ranking advantage; optional toppings and historical
+customizations do not establish default ingredients. Cheese varieties, negation,
+included sides and exact source spans are handled by a deliberately bounded
+ingredient vocabulary. Missing facts remain unknown; dietary safety is not
+certified. This experimental mode does not change the frozen default.
+
+```powershell
+python -m prosus_search search "hamburguer sem queijo" --mode constraint-hybrid --json
+python -m prosus_search serve --mode constraint-hybrid --port 8765
+```
+
+The reusable localhost service exposes `/health` and
+`/search?q=hamburguer%20sem%20queijo&k=5`. Remote API calls are disabled in the
+server. Supported simple requests and cached complex interpretations work offline;
+uncached complex requests return an explicit error. CLI remote interpretation
+requires `--allow-api` and the existing cumulative budget ledger.
+See [the acceptance and evaluation protocol](review/CONSTRAINT-SEARCH.md).
+
 An experimental grounded method is explicitly selectable with
 `python -m prosus_search search "hambúrguer sem queijo para viagem" --mode grounded-local --allow-api --json`.
 It retains E5-small, builds separate source-backed product text, retrieves dense

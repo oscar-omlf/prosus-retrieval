@@ -38,9 +38,9 @@ class SearchService:
         self.counter = token_counter(self.config)
         self.release_id = release_id
         self.embedder = None
-        if mode in {"grounded-local","grounded-rerank","grounded-facets"}:
+        if mode in {"grounded-local","grounded-rerank","grounded-facets","constraint-hybrid"}:
             from .grounded import GroundedSearch
-            self._grounded = GroundedSearch(self.config, release_id, allow_api=allow_api,rerank=mode=="grounded-rerank",facets=mode=="grounded-facets")
+            self._grounded = GroundedSearch(self.config, release_id, allow_api=allow_api,rerank=mode=="grounded-rerank",facets=mode=="grounded-facets",constraints=mode=="constraint-hybrid")
             self.release_id = self._grounded.release_id
             self.mode = mode
             return
@@ -92,7 +92,7 @@ class SearchService:
 
     def _search(self, query: str, k: int, *, bypass_query_cache: bool,
                 eligibility: EligibilitySnapshot | None = None) -> dict:
-        if self.mode in {"grounded-local","grounded-rerank","grounded-facets"}:
+        if self.mode in {"grounded-local","grounded-rerank","grounded-facets","constraint-hybrid"}:
             text = prepare_query(query, self.counter, self.config["representation"]["query_token_cap"])
             return self._grounded.search(text, k, bypass_query_cache=bypass_query_cache, eligibility=eligibility)
         start = time.perf_counter()

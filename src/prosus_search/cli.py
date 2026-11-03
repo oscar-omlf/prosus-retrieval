@@ -31,7 +31,7 @@ def parser() -> argparse.ArgumentParser:
     query = commands.add_parser("search", help="return the top k items for a new natural-language query")
     query.add_argument("query")
     query.add_argument("--k", type=int, default=5)
-    query.add_argument("--mode", choices=("lexical", "semantic-local", "hybrid-local", "grounded-local", "grounded-rerank", "grounded-facets", "semantic-small", "hybrid-small", "semantic-large", "hybrid-large"))
+    query.add_argument("--mode", choices=("lexical", "semantic-local", "hybrid-local", "grounded-local", "grounded-rerank", "grounded-facets", "constraint-hybrid", "semantic-small", "hybrid-small", "semantic-large", "hybrid-large"))
     query.add_argument("--release", help="explicit release ID instead of current pointer")
     query.add_argument("--allow-api", action="store_true")
     query.add_argument("--json", action="store_true", help="include IDs, scores, source excerpts and timings")
@@ -52,6 +52,9 @@ def parser() -> argparse.ArgumentParser:
     export.add_argument("--output", required=True)
     export.add_argument("--run", help="one run only; omit to export all")
     commands.add_parser("budget", help="show persistent confirmed/pending/uncertain spending")
+    serve = commands.add_parser("serve", help="run a localhost-only JSON demo with remote API disabled")
+    serve.add_argument("--port", type=int, default=8765)
+    serve.add_argument("--mode", choices=("constraint-hybrid", "semantic-local", "grounded-local", "grounded-facets"), default="constraint-hybrid")
     return result
 
 
@@ -155,6 +158,9 @@ def main(argv=None) -> int:
             _emit({"output": args.output, "rows": len(rows), "source_descriptions_included": False})
         elif args.command == "budget":
             _emit(open_store(config).summary())
+        elif args.command == "serve":
+            from .server import serve
+            serve(config, port=args.port, mode=args.mode)
         return 0
     except (ValueError, RuntimeError, OSError) as exc:
         # Providers sanitize exceptions at their boundary; never print SDK objects.

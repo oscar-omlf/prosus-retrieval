@@ -165,8 +165,8 @@ def compatibility(plan, facts):
 
 
 class GroundedSearch:
-    def __init__(self, config, baseline_release_id=None, *, allow_api=False, rerank=False, facets=False):
-        if rerank and facets:
+    def __init__(self, config, baseline_release_id=None, *, allow_api=False, rerank=False, facets=False, constraints=False):
+        if sum((rerank, facets, constraints)) > 1:
             raise ValueError('Select either source reranking or facet matching')
         self.config = config
         baseline_release_id = baseline_release_id or load_current(config.resolve('artifacts'))['models']['semantic-local']
@@ -179,20 +179,27 @@ class GroundedSearch:
         self.ids = anchor.ids
         self.facts = tuple(product(record) for record in self.records)
         self.facet_facts = None
+        self.constraint_facts = None
         if facets:
             from .facets import product_facets
             self.facet_facts = tuple(product_facets(r) for r in self.records)
+        if constraints:
+            from .constraints import product as constraint_product
+            self.constraint_facts = tuple(constraint_product(r) for r in self.records)
         self.vocabulary = frozenset().union(*(set(f['type_keys']) | set(f['name_keys']) for f in self.facts))
         from .understanding import SemanticInterpreter
         self.interpreter = SemanticInterpreter(config,allow_api=allow_api)
         if facets:
             from .facet_query import FacetQueryInterpreter
             self.interpreter = FacetQueryInterpreter(self.interpreter)
+        if constraints:
+            from .constraints import ConstraintInterpreter
+            self.interpreter = ConstraintInterpreter(self.interpreter)
         self.reranker = None
         if rerank:
             from .reranking import EvidenceReranker
             self.reranker = EvidenceReranker(config,allow_api=allow_api)
-        self.mode = 'grounded-facets' if facets else 'grounded-rerank' if rerank else 'grounded-local'
+        self.mode = 'constraint-hybrid' if constraints else 'grounded-facets' if facets else 'grounded-rerank' if rerank else 'grounded-local'
         self.client = local_client(config, open_store(config))
         texts = [f['text'] for f in self.facts]
         self.identity = {'version': VERSION, 'source_hash': catalog.source_hash, 'anchor': baseline_release_id,
@@ -204,6 +211,11 @@ class GroundedSearch:
         if facets:
             from . import facets as facet_module
             self.identity['facet_matcher_sha256']=file_hash(facet_module.__file__)
+        if constraints:
+            from . import constraints as constraint_module
+            self.identity['constraint_matcher_sha256'] = file_hash(constraint_module.__file__)
+            self.identity['facet_matcher_sha256'] = file_hash(Path(__file__).with_name('facets.py'))
+            self.identity['constraint_policy'] = constraint_module.POLICY
         self.release_id = canonical_hash(self.identity)
         matrix_identity = {'representation_hash': self.identity['representation_hash'],
                            'model_fingerprint': self.identity['model_fingerprint']}
@@ -248,11 +260,35 @@ class GroundedSearch:
         plan = {'original':query, 'identity_phrase':raw_plan['identity'], 'identity_keys':identity['identity_keys'],
                 **{key:raw_plan[key] for key in ('canonical','domain','requirements','preferences','ambiguity','alternatives')},
                 'interpreter':raw_plan.get('_interpreter','query-only LLM; cached budgeted structured output; no evaluation inputs')}
-        if self.facet_facts is not None:
+        if self.facet_facts is not None or self.constraint_facts is not None:
             plan['identity_keys']=sorted(keys(plan['identity_phrase']))
-        vectors = self.client.embed([plan['original'], plan['canonical']], representation_version=VERSION + '-query', kind='query', bypass_cache=bypass_query_cache)
+        ingredient_statuses = {}
+        selection = None
+        retrieval_query = plan['original']
+        dense_texts = [plan['original'], plan['canonical']]
+        if self.constraint_facts is not None:
+            from .constraints import constraints as classify_constraints, positive_query
+            before_constraints = len(eligible)
+            ingredient_statuses = {i: classify_constraints(plan, self.constraint_facts[i]) for i in eligible}
+            eligible = np.asarray([i for i in eligible if not any(s['violates'] for s in ingredient_statuses[i])], dtype=np.int64)
+            selection = {'externally_eligible_count': before_constraints, 'compatible_count': len(eligible),
+                         'explicit_contradictions_excluded': before_constraints - len(eligible),
+                         'unspecified_ingredients_remain_eligible': True, 'filter_before_candidate_cutoff': True}
+            retrieval_query = positive_query(plan)
+            dense_texts = [plan['original'], retrieval_query]
+            if not len(eligible):
+                if eligibility is not None:
+                    eligibility.assert_fresh()
+                response = {'query': query, 'mode': self.mode, 'release_id': self.release_id, 'results': [],
+                    'interpretation': plan, 'selection': selection, 'scores_are_probabilities': False,
+                    'timing_ms': {'total': (time.perf_counter() - start) * 1000}}
+                if eligibility is not None:
+                    response['eligibility'] = {'revision': eligibility.revision, 'context_id': eligibility.context_id,
+                        'valid_until': eligibility.valid_until, 'eligible_count': before_constraints}
+                return response
+        vectors = self.client.embed(dense_texts, representation_version=VERSION + '-query', kind='query', bypass_cache=bypass_query_cache)
         dense = self.vectors @ normalize_vectors(vectors).T
-        lexical = self.lexical.score(plan['original'])
+        lexical = self.lexical.score(retrieval_query)
         retrieval = np.zeros(len(self.ids), dtype=np.float64)
         for values, lexical_branch in [(dense[:, 0], False), (dense[:, 1], False), (lexical, True)]:
             order = stable_rank([self.ids[i] for i in eligible], values[eligible], min(100, len(eligible)))
@@ -263,7 +299,10 @@ class GroundedSearch:
         candidates = np.flatnonzero(retrieval > 0)
         values, explanations = [], {}
         for i in candidates:
-            if self.facet_facts is not None:
+            if self.constraint_facts is not None:
+                from .constraints import compatibility as constraint_compatibility
+                adjustment, explanations[i] = constraint_compatibility(plan, self.constraint_facts[i], self.facts[i], ingredient_statuses[i])
+            elif self.facet_facts is not None:
                 from .facets import compatibility as facet_compatibility
                 adjustment, explanations[i] = facet_compatibility(plan,self.facet_facts[i],self.facts[i])
             else:
@@ -274,7 +313,7 @@ class GroundedSearch:
         for rank, offset in enumerate(order, 1):
             i = candidates[offset]
             results.append({'item_id': self.ids[i], 'merchant_id': self.records[i].merchant_id, 'rank': rank,
-                'score': float(values[offset]), 'score_kind': self.mode if self.facet_facts is not None else VERSION, 'name': self.records[i].metadata['name'],
+                'score': float(values[offset]), 'score_kind': self.mode if self.facet_facts is not None or self.constraint_facts is not None else VERSION, 'name': self.records[i].metadata['name'],
                 'description': self.records[i].metadata.get('description', ''), 'explanation': explanations[i]})
         reranking = None
         if self.reranker is not None:
@@ -284,6 +323,8 @@ class GroundedSearch:
                     'timing_ms': {'total': (time.perf_counter() - start) * 1000}}
         if reranking is not None:
             response['reranking']=reranking
+        if selection is not None:
+            response['selection'] = selection
         if eligibility is not None:
             eligibility.assert_fresh()
             response['eligibility'] = {'revision': eligibility.revision, 'context_id': eligibility.context_id,
