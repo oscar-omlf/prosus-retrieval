@@ -12,7 +12,7 @@ See the [review report](review/REPORT.md) for measured quality, coverage, spendi
 and limitations. Semantic-local remains the incumbent until frozen development
 selection justifies a change; passing tests is not evidence of search quality.
 
-**Review verdict:** operational prototype, quality targets unmet. Frozen final
+**Historical final review:** operational prototype, quality targets unmet. Frozen final
 E5 estimates are nDCG@5 **0.695**, Success@5 **47.1%**, MRR@5 **0.381**, and mandatory
 contradiction exposure **30.3%**. All 755 pooled pairs are judged after explicit
 adjudication, but repeat checks remain incomplete and no human calibration was
@@ -20,8 +20,19 @@ available. No method earned promotion on development. The 180-test suite, fresh
 inference and exact 1,500-row replay pass. Conservative API spending is
 **$0.622962**, including uncertain calls; the existing $4.50 ceiling is unchanged.
 
+**Current development cycle:** the first 11-variant comparison retains E5-small;
+none of the alternatives met the material-gain criteria. All 877 shared top-five
+pairs and the deeper diagnostic pool are judged. These are mixed-source LLM
+estimates with independent blinded checks, not human ground truth. Cumulative
+project API accounting is now **$0.691229**, including uncertainty. The original
+final set is already used; new experiments do not treat it as untouched.
+[Acceptance criteria](review/ACCEPTANCE-v2.md), [experiment decisions](review/EXPERIMENTS-v2.md),
+[current progress](review/PROGRESS.md), [production path](review/PRODUCTION-PATH-v2.md)
+and [cost boundaries](review/COST-v2.md) distinguish demonstrated results from
+remaining work. Ranking relevance targets remain unmet.
+
 [Ranked results](review/evidence/selected-top5.csv) · [Independent review](review/REPORT.md) ·
-[Five-slide presentation](review/presentation/independent-review.pptx) ·
+[Historical five-slide presentation](review/presentation/independent-review.pptx) ·
 [Evaluation protocol](review/EVALUATION.md)
 
 ## Quick start
@@ -81,11 +92,19 @@ The convenience function `prosus_search.service.search(query, k=5)` also works;
 creating a fresh service for every request repeats loading. A service admits at
 most four simultaneous calls by default and raises `SearchBusyError` when full.
 Callers should use bounded backoff or an explicit overload response. One loaded
-service sustained about 334 fresh-inference queries/second with four callers on
-the review host **with query-cache lookup and persistence bypassed**. A separate
-900-query diagnostic measured about 81 QPS / 108 ms p95 for genuine cache misses
-including SQLite persistence. These synthetic local measurements are not a
-production SLA; see [the independent cache audit](review/evidence/independent-cache-audit.json).
+service completed 5,418 genuine query-cache misses, including SQLite persistence,
+in 60.03 seconds: **90.26 QPS, 92.72 ms p95, 141.55 ms p99**, with zero errors.
+Loaded RSS was 0.829 GiB and peak RSS 1.181 GiB. A separate mixed-load run offered
+102 requests/second and rejected 1.60%; saturation and rejected work must be
+reported with accepted-request latency. These host-local measurements use short
+development queries plus unique suffixes and do not establish production API
+capacity. See [performance protocol and evidence](review/PERFORMANCE-v2.md).
+
+The library also accepts a validated, expiring eligibility snapshot and filters
+before candidate selection. Empty or small eligible sets return fewer than `k`
+results. A marketplace backend must supply authoritative stock/geography/merchant
+eligibility and authenticate its context; these feeds are proposed production
+work. See [the demonstrated eligibility contract](review/ELIGIBILITY-v2.md).
 
 ## Preparation and comparison
 
