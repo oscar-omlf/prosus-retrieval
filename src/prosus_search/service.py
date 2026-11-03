@@ -12,6 +12,7 @@ from .config import Config, ConfigError, load_config, token_counter
 from .eligibility import EligibilityError, EligibilitySnapshot
 from .representation import prepare_catalog, prepare_query
 from .retrieval import SearchEngine
+from .snapshots import freeze_json
 
 
 class SearchBusyError(RuntimeError):
@@ -27,7 +28,8 @@ class SearchService:
 
     def __init__(self, config: Config | str = "config.toml", *, mode: str | None = None,
                  release_id: str | None = None, allow_api: bool = False, max_concurrency: int = 4):
-        self.config = load_config(config) if isinstance(config, str) else config
+        source_config = load_config(config) if isinstance(config, str) else config
+        self.config = Config(source_config.path, freeze_json(source_config.values))
         if type(max_concurrency) is not int or max_concurrency < 1:
             raise ConfigError("max_concurrency must be a positive integer")
         self._admission = BoundedSemaphore(max_concurrency)

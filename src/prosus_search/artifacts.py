@@ -14,6 +14,7 @@ import uuid
 import numpy as np
 
 from .store import canonical_json, content_hash, utc_now
+from .snapshots import freeze_json
 
 
 class ArtifactError(RuntimeError):
@@ -201,7 +202,7 @@ def _load_directory(path: Path, expected_id: str) -> Release:
     if matrix.dtype != np.dtype("float32"):
         raise ArtifactError("Release vectors must be float32")
     _validate_matrix(matrix, len(ids), manifest.get("dimensions", 0), normalize=False)
-    return Release(expected_id, path, manifest, items, tuple(ids), matrix)
+    return Release(expected_id, path, freeze_json(manifest), tuple(freeze_json(item) for item in items), tuple(ids), matrix)
 
 
 def load_release(root: str | Path, release_id: str, expected_model: str | None = None,

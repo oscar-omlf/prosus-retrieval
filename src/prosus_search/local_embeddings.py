@@ -21,6 +21,7 @@ import uuid
 import numpy as np
 
 from .retrieval import normalize_vectors
+from .snapshots import freeze_json
 from .store import Store, canonical_json, content_hash, utc_now
 
 
@@ -193,7 +194,7 @@ class LocalEmbeddingClient:
         if type(intra_op_threads) is not int or intra_op_threads < 1:
             raise LocalEmbeddingError("intra_op_threads must be a positive integer")
         self.store, self.model_dir, self.revision = store, Path(model_dir), revision
-        self.manifest = validate_model_directory(self.model_dir, revision)
+        self.manifest = freeze_json(validate_model_directory(self.model_dir, revision))
         self.model_id, self.dimensions = MODEL_ID, DIMENSIONS
         self.batch_size, self.intra_op_threads = batch_size, intra_op_threads
         self._tokenizer = None

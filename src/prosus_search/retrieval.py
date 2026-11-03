@@ -6,7 +6,7 @@ are not probabilities of relevance. All ties resolve by canonical item ID.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 from threading import Lock
 from typing import Collection, Sequence
@@ -14,6 +14,7 @@ from typing import Collection, Sequence
 import numpy as np
 
 from .representation import PreparedCatalog, lexical_tokens, normalize_text
+from .snapshots import freeze_json
 
 
 class RetrievalError(ValueError):
@@ -207,8 +208,12 @@ class SearchEngine:
         rrf_k: int = 60,
         rrf_depth: int = 100,
     ):
-        self.prepared = prepared
-        self.ids = tuple(item.record.item_id for item in prepared.items)
+        # A frozen dataclass alone does not freeze its nested metadata. Detach
+        # the caller's JSON once so names/evidence cannot drift from vectors.
+        self.prepared = replace(prepared, items=tuple(
+            replace(item, record=replace(item.record, metadata=freeze_json(item.record.metadata)))
+            for item in prepared.items))
+        self.ids = tuple(item.record.item_id for item in self.prepared.items)
         if not self.ids or self.ids != tuple(sorted(set(self.ids))):
             raise RetrievalError("prepared item IDs must be unique and in canonical sorted order")
         _positive_integer(rrf_k, "rrf_k")
@@ -218,7 +223,9 @@ class SearchEngine:
             matrix = normalize_vectors(vectors)
             if matrix.ndim != 2 or matrix.shape[0] != len(self.ids):
                 raise RetrievalError("catalog vectors and item IDs are not aligned")
-            self.vectors = matrix
+            # A writable owning array can undo setflags(write=False). A bytes
+            # backing keeps this snapshot read-only, including through views.
+            self.vectors = np.frombuffer(matrix.tobytes(), dtype=matrix.dtype).reshape(matrix.shape)
         self.k1, self.b, self.rrf_k, self.rrf_depth = k1, b, rrf_k, rrf_depth
         self._lexical: LexicalIndex | None = None
         self._lexical_lock = Lock()
