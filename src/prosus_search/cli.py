@@ -31,7 +31,7 @@ def parser() -> argparse.ArgumentParser:
     query = commands.add_parser("search", help="return the top k items for a new natural-language query")
     query.add_argument("query")
     query.add_argument("--k", type=int, default=5)
-    query.add_argument("--mode", choices=("lexical", "semantic-local", "hybrid-local", "grounded-local", "semantic-small", "hybrid-small", "semantic-large", "hybrid-large"))
+    query.add_argument("--mode", choices=("lexical", "semantic-local", "hybrid-local", "grounded-local", "grounded-rerank", "semantic-small", "hybrid-small", "semantic-large", "hybrid-large"))
     query.add_argument("--release", help="explicit release ID instead of current pointer")
     query.add_argument("--allow-api", action="store_true")
     query.add_argument("--json", action="store_true", help="include IDs, scores, source excerpts and timings")

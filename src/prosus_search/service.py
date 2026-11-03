@@ -36,9 +36,9 @@ class SearchService:
         self.counter = token_counter(self.config)
         self.release_id = release_id
         self.embedder = None
-        if mode == "grounded-local":
+        if mode in {"grounded-local","grounded-rerank"}:
             from .grounded import GroundedSearch
-            self._grounded = GroundedSearch(self.config, release_id, allow_api=allow_api)
+            self._grounded = GroundedSearch(self.config, release_id, allow_api=allow_api,rerank=mode=="grounded-rerank")
             self.release_id = self._grounded.release_id
             self.mode = mode
             return
@@ -90,7 +90,7 @@ class SearchService:
 
     def _search(self, query: str, k: int, *, bypass_query_cache: bool,
                 eligibility: EligibilitySnapshot | None = None) -> dict:
-        if self.mode == "grounded-local":
+        if self.mode in {"grounded-local","grounded-rerank"}:
             text = prepare_query(query, self.counter, self.config["representation"]["query_token_cap"])
             return self._grounded.search(text, k, bypass_query_cache=bypass_query_cache, eligibility=eligibility)
         start = time.perf_counter()

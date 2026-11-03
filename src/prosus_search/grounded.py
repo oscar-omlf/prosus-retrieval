@@ -165,7 +165,7 @@ def compatibility(plan, facts):
 
 
 class GroundedSearch:
-    def __init__(self, config, baseline_release_id=None, *, allow_api=False):
+    def __init__(self, config, baseline_release_id=None, *, allow_api=False, rerank=False):
         self.config = config
         baseline_release_id = baseline_release_id or load_current(config.resolve('artifacts'))['models']['semantic-local']
         anchor = load_release(config.resolve('artifacts'), baseline_release_id,
@@ -179,12 +179,19 @@ class GroundedSearch:
         self.vocabulary = frozenset().union(*(set(f['type_keys']) | set(f['name_keys']) for f in self.facts))
         from .understanding import SemanticInterpreter
         self.interpreter = SemanticInterpreter(config,allow_api=allow_api)
+        self.reranker = None
+        if rerank:
+            from .reranking import EvidenceReranker
+            self.reranker = EvidenceReranker(config,allow_api=allow_api)
+        self.mode = 'grounded-rerank' if rerank else 'grounded-local'
         self.client = local_client(config, open_store(config))
         texts = [f['text'] for f in self.facts]
         self.identity = {'version': VERSION, 'source_hash': catalog.source_hash, 'anchor': baseline_release_id,
                          'representation_hash': canonical_hash(texts), 'policy': POLICY,
                          'producer_sha256': file_hash(__file__), 'model_fingerprint': self.client.manifest['model_fingerprint']}
         self.identity['query_interpreter_fingerprint']=self.interpreter.fingerprint
+        if self.reranker is not None:
+            self.identity['reranker_fingerprint']=self.reranker.fingerprint
         self.release_id = canonical_hash(self.identity)
         matrix_identity = {'representation_hash': self.identity['representation_hash'],
                            'model_fingerprint': self.identity['model_fingerprint']}
@@ -211,12 +218,14 @@ class GroundedSearch:
         start = time.perf_counter()
         if type(k) is not int or not 1 <= k <= min(100, len(self.ids)):
             raise ValueError('Grounded k must be between 1 and min(100, catalog size)')
+        if self.reranker is not None and k>5:
+            raise ValueError('Source-aware reranking supports up to five returned items')
         if eligibility is not None and not isinstance(eligibility, EligibilitySnapshot):
             raise ValueError('Provide an EligibilitySnapshot')
         allowed = eligibility.validate_for(self.release_id, self.ids) if eligibility is not None else None
         eligible = np.asarray([i for i, item_id in enumerate(self.ids) if allowed is None or item_id in allowed], dtype=np.int64)
         if not len(eligible):
-            response = {'query': query, 'mode': 'grounded-local', 'release_id': self.release_id, 'results': [], 'scores_are_probabilities': False}
+            response = {'query': query, 'mode': self.mode, 'release_id': self.release_id, 'results': [], 'scores_are_probabilities': False}
             if eligibility is not None:
                 eligibility.assert_fresh()
                 response['eligibility'] = {'revision': eligibility.revision, 'context_id': eligibility.context_id,
@@ -242,16 +251,21 @@ class GroundedSearch:
         for i in candidates:
             adjustment, explanations[i] = compatibility(plan, self.facts[i])
             values.append(retrieval[i] / 3. + adjustment)
-        order = stable_rank([self.ids[i] for i in candidates], np.asarray(values), min(k, len(candidates)))
+        order = stable_rank([self.ids[i] for i in candidates], np.asarray(values), min(10 if self.reranker is not None else k, len(candidates)))
         results = []
         for rank, offset in enumerate(order, 1):
             i = candidates[offset]
             results.append({'item_id': self.ids[i], 'merchant_id': self.records[i].merchant_id, 'rank': rank,
                 'score': float(values[offset]), 'score_kind': VERSION, 'name': self.records[i].metadata['name'],
                 'description': self.records[i].metadata.get('description', ''), 'explanation': explanations[i]})
-        response = {'query': query, 'mode': 'grounded-local', 'release_id': self.release_id, 'results': results,
+        reranking = None
+        if self.reranker is not None:
+            results,reranking=self.reranker.rank(query,plan,results,{r.item_id:r.metadata for r in self.records},k)
+        response = {'query': query, 'mode': self.mode, 'release_id': self.release_id, 'results': results,
                     'interpretation': plan, 'scores_are_probabilities': False,
                     'timing_ms': {'total': (time.perf_counter() - start) * 1000}}
+        if reranking is not None:
+            response['reranking']=reranking
         if eligibility is not None:
             eligibility.assert_fresh()
             response['eligibility'] = {'revision': eligibility.revision, 'context_id': eligibility.context_id,
