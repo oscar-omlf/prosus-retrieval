@@ -144,9 +144,18 @@ class Store:
             connection.close()
 
     @contextmanager
-    def api_writer(self) -> Iterator[None]:
-        """One API writer across processes. No SQLite transaction spans the call."""
-        with self.lock_path.open("a+b") as handle:
+    def api_writer(self, scope: str | None = None) -> Iterator[None]:
+        """One writer per operation key; budget reservations remain globally atomic.
+
+        The default retains the catalog-build lock. Distinct judge keys may run
+        concurrently; duplicate assessments still cannot transmit twice.
+        """
+        lock_path = self.lock_path
+        if scope is not None:
+            lock_dir = self.path.with_suffix(self.path.suffix + ".locks")
+            lock_dir.mkdir(exist_ok=True)
+            lock_path = lock_dir / (content_hash(scope) + ".lock")
+        with lock_path.open("a+b") as handle:
             handle.seek(0, os.SEEK_END)
             if handle.tell() == 0:
                 handle.write(b"0")
