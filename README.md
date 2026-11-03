@@ -1,5 +1,43 @@
 # Portuguese marketplace semantic search
 
+**Submission:** [five-slide deck](review/submission/prosus-search-v4.pptx) ·
+[500 quality-mode predictions](review/submission/contextual-top5.csv) ·
+[setup, validation and evaluation guide](review/SUBMISSION.md) ·
+[manifest and API accounting](review/submission/manifest.json).
+
+Two explicit paths are available. The frozen `semantic-local` default runs
+offline; `--mode contextual --allow-api` adds the measured 24-candidate
+GPT-4.1-mini quality stage, with source-backed ingredient filtering and an
+official OpenAI key named `OPENAI_NEW_KEY` in ignored `.env`. The fast
+constraint-aware option remains `--mode constraint-hybrid`. No key is needed
+to read the submitted outputs or replay their evaluation.
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements-lock.txt
+python -m pip install --no-deps -e .
+python -m prosus_search setup --local-model
+python -m prosus_search build --backend local
+python -m prosus_search search "pizza de queijo" --mode semantic-local --json
+# Optional quality mode after setting OPENAI_NEW_KEY in .env:
+python -m prosus_search search "hamburguer sem queijo" --mode contextual --allow-api --json
+```
+
+Requires the supplied `5k_items_curated.csv` and `queries.csv` in the repository
+root and Python 3.12+. On macOS/Linux use `source .venv/bin/activate`.
+The first setup downloads approximately 490 MB of pinned model assets. The guide
+explains the Windows lock file, alternative dependency installation and caches.
+
+**Verified:** 513 tests passed, all 42 measured quality rankings replayed exactly,
+and the HTTP service matched all 500 submitted result IDs. Fresh synthetic
+nDCG@5 is .799 versus .774 for the constraint-aware control; the confidence
+interval includes zero. Results use model judgments, not human ground truth.
+Quality mode adds about 1.6 s of first-call API ranking latency. The manifest records
+the current cumulative ledger; older sections below preserve accounting snapshots.
+
+The remainder documents prior experiments and their historical evidence.
+
 Type a Portuguese query and choose how many results to return. The system embeds
 the query, scores all **4,997 distinct catalog items**, and returns the top `k`.
 Product vectors are prepared once. Search never calls a relevance judge.
@@ -7,9 +45,10 @@ Product vectors are prepared once. Search never calls a relevance judge.
 The latest [architecture reassessment](review/REASSESSMENT.md) compares field
 lexical retrieval, a lean hybrid and contextual shortlist ranking against the
 constraint-aware control. Reranking helped development queries, but its gain on
-12 fresh synthetic queries was uncertain and added latency. It remains a research
-experiment; no default or serving release changed. The cumulative ledger now
-stands at **$2.504944 / $4.50**; amounts in earlier experiment sections are snapshots.
+12 fresh synthetic queries was uncertain and added latency. The measured
+contextual candidate is now an explicit serving option.
+The frozen default is unchanged. The current cumulative ledger is in the
+[submission manifest](review/submission/manifest.json); earlier amounts are snapshots.
 
 `--mode constraint-hybrid` adds explicit ingredient-contradiction filtering before
 hybrid candidate selection. Unspecified ingredients remain eligible. Supported
@@ -167,7 +206,9 @@ Requires Python 3.12+, network access for setup, and the supplied
 `5k_items_curated.csv` and `queries.csv` in the repository root. Raw inputs, model
 weights, caches and detailed outputs are excluded from Git because redistribution
 permission is unconfirmed. Submitted result CSVs contain stable query/item IDs and
-scores; join them to the supplied inputs for full text.
+scores; join the current submission export to the supplied inputs for full text.
+Some historical evidence CSVs also contain query text and product names; they are
+not the minimal submission export linked at the top.
 
 ```powershell
 python -m venv .venv
