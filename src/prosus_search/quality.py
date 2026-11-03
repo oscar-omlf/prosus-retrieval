@@ -1,8 +1,4 @@
-"""Optional contextual quality mode; frozen fast modes remain unchanged.
-
-The 24-item candidate union and ranking packet match the measured reassessment.
-No evaluation cards or grades enter serving. Unknown ingredients remain eligible.
-"""
+"""Constraint-aware candidate retrieval and contextual ordering."""
 from __future__ import annotations
 
 import json
@@ -16,12 +12,12 @@ import numpy as np
 from dotenv import dotenv_values
 
 from .artifacts import file_hash
-from .benchmark import open_store
+from .runtime import open_store
 from .config import Config,load_config,token_counter
 from .constraints import constraints,positive_query
-from .evaluation import canonical_hash
+from .runtime import canonical_hash
 from .grounded import keys,VERSION as GROUNDED_VERSION
-from .judge import JudgeClient,JudgeConfig,JudgmentValidationError,_payload,protocol_hash
+from .model_client import ModelClient,ModelConfig,ModelValidationError,_payload,protocol_hash
 from .representation import prepare_query
 from .retrieval import LexicalIndex,stable_rank
 from .service import SearchService,SearchBusyError
@@ -71,8 +67,9 @@ class _OfficialProvider:
             'usage':{'input_tokens':response.usage.prompt_tokens,'output_tokens':response.usage.completion_tokens}}
 
 
-def _client(config,store,allow_api,purpose,model='openai/gpt-4.1-mini'):
-    return JudgeClient(store,config=JudgeConfig.gpt41(model,base_url=BASE,
+def _client(config,store,allow_api,purpose):
+    model=config['models']['ranker' if purpose=='ranking' else 'query']
+    return ModelClient(store,config=ModelConfig.gpt41(model,base_url=BASE,
         input_token_cap=16384 if purpose=='ranking' else 4096,
         output_token_cap=512 if purpose=='ranking' else 2048,
         protocol_version=VERSION+'-'+purpose),allow_api=allow_api,
@@ -82,7 +79,7 @@ def _client(config,store,allow_api,purpose,model='openai/gpt-4.1-mini'):
 
 def _execute(client,prompt,data,schema,validator,purpose):
     payload=_payload(client.config,prompt,data,schema,purpose)
-    key='judge:'+canonical_hash({'payload':payload,'replicate_id':VERSION+'-'+purpose,
+    key='model:'+canonical_hash({'payload':payload,'replicate_id':VERSION+'-'+purpose,
         'protocol':protocol_hash(client.config),'purpose':purpose})
     cached=client.store.lookup(key)
     if client.allow_api and not (cached and cached.get('status')=='valid'):
@@ -91,8 +88,11 @@ def _execute(client,prompt,data,schema,validator,purpose):
         VERSION+'-'+purpose,'development',purpose,validator)
     if record['status']!='valid':
         attempts=record.get('attempts',[]);status=attempts[-1].get('http_status') if attempts else None
+        detail=attempts[-1].get('validation_error') if attempts else None
+        guidance=('Uncached requests require --allow-api.' if not client.allow_api
+                  else 'The request was stopped after validation or provider failure.')
         raise QualityError(f"Quality {purpose} unavailable: {record.get('reason')}; HTTP {status}. "
-            'Use --allow-api for an uncached query. No alternative service or ranking was substituted.')
+            f"{detail or ''} {guidance} No alternative service or ranking was substituted.")
     return record
 
 
@@ -106,7 +106,7 @@ class _PlanBridge:
         seeded=self.store.lookup(self.seed_key(query))
         if seeded:return validate_query(seeded['value'],query)
         try:return self.original.interpret(query)
-        except RuntimeError:pass  # offline-only original; never transmit a key to the old gateway
+        except RuntimeError:pass  # the control interpreter is always offline
         return _execute(self.client,QUERY_PROMPT,{'consulta':query},QUERY_SCHEMA,
             lambda v:validate_query(normalize_quantity_dimension(v),query),'query')['value']
 
@@ -116,7 +116,7 @@ def validate_ids(value,ids):
     if (not isinstance(value,dict) or set(value)!={'ids'} or not isinstance(selected,list) or
             len(selected)!=5 or any(not isinstance(i,str) for i in selected) or
             len(set(selected))!=5 or not set(selected)<=set(ids)):
-        raise JudgmentValidationError('Quality ranking requires five distinct candidate IDs')
+        raise ModelValidationError('Quality ranking requires five distinct candidate IDs')
     return value
 
 
@@ -188,30 +188,3 @@ class QualitySearch:
                     'cache_hit':record.get('cache_hit',False),'cache_key':record['cache_key']},
                 'scores_are_probabilities':False,'timing_ms':{'total':(time.perf_counter()-start)*1000}}
         finally:self._admission.release()
-
-    def seed(self,query,plan,record):
-        """Import a measured ranking only after exact input/prompt/schema checks."""
-        raw={'identity':plan['identity_phrase'],**{k:plan[k] for k in
-            ('canonical','domain','requirements','preferences','ambiguity','alternatives')}}
-        validate_query(raw,query)
-        previous=self.bridge.overrides.get(query)
-        self.bridge.overrides[query]=raw
-        try:data,schema,_=self.candidates(query)
-        finally:
-            if previous is None:self.bridge.overrides.pop(query,None)
-            else:self.bridge.overrides[query]=previous
-        old=record['payload'];old_data=json.loads(old['input'][0]['content'][0]['text'])
-        if (old['model']!=self.ranker.config.model or old['max_output_tokens']!=512 or
-                old['instructions']!=RERANK_PROMPT or old_data!=data or old['text']['format']['schema']!=schema):
-            raise ValueError('Measured ranking input differs from current quality candidate packet')
-        validate_ids(record['value'],[p['item_id'] for p in data['candidates']])
-        payload=_payload(self.ranker.config,RERANK_PROMPT,data,schema,'ranking')
-        key='judge:'+canonical_hash({'payload':payload,'replicate_id':VERSION+'-ranking',
-            'protocol':protocol_hash(self.ranker.config),'purpose':'ranking'})
-        preflight=self.ranker.preflight(payload)
-        self.store.put(self.bridge.seed_key(query),{'value':raw,'origin':'frozen experiment query plan'})
-        self.store.put(key,{**record,'cache_key':key,'payload':payload,'protocol_hash':protocol_hash(self.ranker.config),
-            'replicate_id':VERSION+'-ranking','seeded_from_cache_key':record['cache_key'],
-            'payload_hash':canonical_hash(payload),'preflight':preflight,
-            'seed_origin_payload_hash':record['payload_hash'],
-            'origin':'same-model frozen ranking, exact serving inputs verified'})

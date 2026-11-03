@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "prosus-food-search"
-version = "0.1.0"
+version = "0.2.0"
 description = "Reproducible Portuguese marketplace semantic search"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -15,19 +15,13 @@ dependencies = [
   "openai==3.42.1",
   "python-dotenv==1.2.4",
   "snowballstemmer==3.1.1",
+  "onnxruntime==1.31.1",
+  "tokenizers==0.23.3",
+  "huggingface-hub==2.4.0",
 ]
-
-[project.optional-dependencies]
-local = ["onnxruntime==1.31.1", "tokenizers==0.23.3", "huggingface-hub==2.4.0"]
-dev = ["pytest==9.2.0"]
-
-[project.scripts]
-food-search = "prosus_search.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-pythonpath = ["src"]
-addopts = "-ra"
+[project.scripts]
+food-search = "prosus_search.cli:main"

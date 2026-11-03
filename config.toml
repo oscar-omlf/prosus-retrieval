@@ -1,15 +1,10 @@
-# No credentials belong in this file. Hosted calls require --allow-api.
-[api]
-base_url = "https://lcm-litellm.prosus.com/"
-
+# Paths are local and ignored by Git. Never put credentials here.
 [paths]
 catalog = "5k_items_curated.csv"
 queries = "queries.csv"
 state = "work/state.sqlite3"
 artifacts = "work/artifacts"
 model_dir = "work/models/multilingual-e5-small"
-split = "protocols/split-v1.json"
-outputs = "outputs"
 tokenizer_cache = "work/tokenizers"
 
 [data]
@@ -34,18 +29,11 @@ dimensions = 384
 batch_size = 16
 threads = 6
 
-[models.small]
-model = "openai/text-embedding-3-small"
-dimensions = 1536
-input_rate_per_million = "0.02"
-epoch = "v1"
+[models]
+query = "openai/gpt-4.1-mini"
+ranker = "openai/gpt-4.1-mini"
 
-[models.large]
-model = "openai/text-embedding-3-large"
-dimensions = 3072
-input_rate_per_million = "0.13"
-epoch = "v1"
-
+# Existing ledger allocations are immutable; keep them when reusing local state.
 [budget]
 global_micro_usd = 4500000
 embeddings = 500000
@@ -53,11 +41,3 @@ development = 1400000
 final = 850000
 round4 = 1000000
 recovery = 750000
-
-[evaluation]
-seed = 20261102
-bootstrap_replicates = 2000
-primary_model = "openai/gpt-4.1-mini"
-secondary_model = "openai/gpt-4.1"
-input_token_cap = 3072
-output_token_cap = 1024

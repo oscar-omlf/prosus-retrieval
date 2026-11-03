@@ -44,7 +44,7 @@ class ConstraintInterpreter:
     """Full-consumption local ingredient grammar; explicit semantic route otherwise."""
     def __init__(self, semantic):
         from .artifacts import file_hash
-        from .evaluation import canonical_hash
+        from .runtime import canonical_hash
         self.semantic = semantic
         self.fingerprint = canonical_hash({'code': file_hash(__file__), 'semantic': semantic.fingerprint})
 

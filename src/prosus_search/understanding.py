@@ -6,10 +6,10 @@ import re
 from copy import deepcopy
 from decimal import Decimal, InvalidOperation
 
-from .benchmark import open_store
+from .runtime import open_store
 from .config import token_counter
-from .judge import JudgeClient, JudgeConfig, JudgmentValidationError, _payload
-from .evaluation import canonical_hash
+from .model_client import ModelClient, ModelConfig, ModelValidationError, _payload
+from .runtime import canonical_hash
 from .artifacts import file_hash
 
 INSTRUCTIONS = '''Interprete uma consulta em português para busca em marketplace misto:
@@ -62,21 +62,21 @@ def normalize_quantity_dimension(value):
 
 def validate(value, query):
     if set(value) != set(SCHEMA['properties']) or value['domain'] not in SCHEMA['properties']['domain']['enum']:
-        raise JudgmentValidationError('Invalid interpretation fields/domain')
+        raise ModelValidationError('Invalid interpretation fields/domain')
     for name in ('identity','canonical'):
         if not isinstance(value[name],str) or not value[name].strip():
-            raise JudgmentValidationError('Missing semantic identity/canonical query')
+            raise ModelValidationError('Missing semantic identity/canonical query')
     for field in ('requirements','preferences'):
         if not isinstance(value[field],list):
-            raise JudgmentValidationError('Interpretation clauses must be lists')
+            raise ModelValidationError('Interpretation clauses must be lists')
         for clause in value[field]:
             expected = {'value','source_span'} | ({'relation'} if field=='requirements' else set())
             if (set(clause)!=expected or not isinstance(clause['source_span'],str)
                     or not clause['source_span'] or clause['source_span'] not in query
                     or not isinstance(clause['value'],str) or not clause['value'].strip()):
-                raise JudgmentValidationError('Interpretation clause lacks query provenance')
+                raise ModelValidationError('Interpretation clause lacks query provenance')
             if field=='requirements' and clause['relation'] not in SCHEMA['properties']['requirements']['items']['properties']['relation']['enum']:
-                raise JudgmentValidationError('Unknown interpretation relation')
+                raise ModelValidationError('Unknown interpretation relation')
             if clause.get('relation')=='portion':
                 words={'um':'1','uma':'1','dois':'2','duas':'2','tres':'3','três':'3',
                        'quatro':'4','cinco':'5','seis':'6','sete':'7','oito':'8',
@@ -85,18 +85,18 @@ def validate(value, query):
                 supported=clause['value'] in re.findall(r'\b\d+\b',clause['source_span']) or (
                     written is not None and words[written.group(1).lower()]==clause['value'])
                 if not clause['value'].isdigit() or not supported:
-                    raise JudgmentValidationError('Portion must preserve an explicit digit or written person count')
+                    raise ModelValidationError('Portion must preserve an explicit digit or written person count')
     for field in ('ambiguity','alternatives'):
         if not isinstance(value[field],list) or any(not isinstance(x,str) for x in value[field]):
-            raise JudgmentValidationError('Invalid semantic ambiguity alternatives')
+            raise ModelValidationError('Invalid semantic ambiguity alternatives')
     return value
 
 
 class SemanticInterpreter:
     def __init__(self,config,*,allow_api=False):
-        factory = JudgeConfig.gpt41 if config['evaluation']['primary_model'].removeprefix('openai/').startswith('gpt-4.1') else JudgeConfig
-        self.client=JudgeClient(open_store(config),config=factory(
-            model=config['evaluation']['primary_model'],base_url=config['api']['base_url'],
+        factory = ModelConfig.gpt41
+        self.client=ModelClient(open_store(config),config=factory(
+            model=config['models']['query'],base_url='https://api.openai.com/v1/',
             timeout_seconds=30,protocol_version='grounded-query-semantic-v1'),
             allow_api=allow_api,token_counter=token_counter(config),max_attempts=1)
         self.fingerprint=canonical_hash({'instructions':INSTRUCTIONS,'schema':SCHEMA,
@@ -114,7 +114,7 @@ class SemanticInterpreter:
             for attempt in record.get('attempts',[]):
                 try:
                     value=validate(normalize_quantity_dimension(json.loads(attempt.get('visible_output') or '')),query)
-                except (ValueError,TypeError,KeyError,JudgmentValidationError):
+                except (ValueError,TypeError,KeyError,ModelValidationError):
                     continue
                 recovered={**record,'status':'valid','value':value,
                     'validation_recovery':'explicit-quantity-dimension-v1',
@@ -124,7 +124,7 @@ class SemanticInterpreter:
                 break
         if record['status']!='valid' and record.get('reason')=='invalid_structured_output' and self.client.config.model.startswith('openai/gpt-4.1'):
             # Declared query-only adjudication; no products, rankings or grades.
-            reviewer=JudgeClient(self.client.store,config=JudgeConfig.gpt41('openai/gpt-4.1',
+            reviewer=ModelClient(self.client.store,config=ModelConfig.gpt41('openai/gpt-4.1',
                 base_url=self.client.config.base_url,input_token_cap=4096,output_token_cap=2048,
                 timeout_seconds=45,protocol_version='query-schema-adjudication-v1'),
                 allow_api=self.client.allow_api,token_counter=self.client.token_counter,max_attempts=1)

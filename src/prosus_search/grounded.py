@@ -16,10 +16,10 @@ import numpy as np
 import snowballstemmer
 
 from .artifacts import file_hash, load_current, load_release
-from .benchmark import local_client, open_store, read_json, write_json
+from .runtime import local_client, open_store, read_json, write_json
 from .catalog import load_catalog
 from .eligibility import EligibilitySnapshot
-from .evaluation import canonical_hash
+from .runtime import canonical_hash
 from .representation import lexical_tokens, normalize_text, portion_claims
 from .retrieval import LexicalIndex, normalize_vectors, stable_rank
 from .snapshots import freeze_json
@@ -165,9 +165,7 @@ def compatibility(plan, facts):
 
 
 class GroundedSearch:
-    def __init__(self, config, baseline_release_id=None, *, allow_api=False, rerank=False, facets=False, constraints=False):
-        if sum((rerank, facets, constraints)) > 1:
-            raise ValueError('Select either source reranking or facet matching')
+    def __init__(self, config, baseline_release_id=None, *, allow_api=False, constraints=True):
         self.config = config
         baseline_release_id = baseline_release_id or load_current(config.resolve('artifacts'))['models']['semantic-local']
         anchor = load_release(config.resolve('artifacts'), baseline_release_id,
@@ -180,37 +178,21 @@ class GroundedSearch:
         self.facts = tuple(product(record) for record in self.records)
         self.facet_facts = None
         self.constraint_facts = None
-        if facets:
-            from .facets import product_facets
-            self.facet_facts = tuple(product_facets(r) for r in self.records)
         if constraints:
             from .constraints import product as constraint_product
             self.constraint_facts = tuple(constraint_product(r) for r in self.records)
         self.vocabulary = frozenset().union(*(set(f['type_keys']) | set(f['name_keys']) for f in self.facts))
         from .understanding import SemanticInterpreter
-        self.interpreter = SemanticInterpreter(config,allow_api=allow_api)
-        if facets:
-            from .facet_query import FacetQueryInterpreter
-            self.interpreter = FacetQueryInterpreter(self.interpreter)
-        if constraints:
-            from .constraints import ConstraintInterpreter
-            self.interpreter = ConstraintInterpreter(self.interpreter)
-        self.reranker = None
-        if rerank:
-            from .reranking import EvidenceReranker
-            self.reranker = EvidenceReranker(config,allow_api=allow_api)
-        self.mode = 'constraint-hybrid' if constraints else 'grounded-facets' if facets else 'grounded-rerank' if rerank else 'grounded-local'
+        self.interpreter = SemanticInterpreter(config,allow_api=False)
+        from .constraints import ConstraintInterpreter
+        self.interpreter = ConstraintInterpreter(self.interpreter)
+        self.mode = 'constraint-hybrid'
         self.client = local_client(config, open_store(config))
         texts = [f['text'] for f in self.facts]
         self.identity = {'version': VERSION, 'source_hash': catalog.source_hash, 'anchor': baseline_release_id,
                          'representation_hash': canonical_hash(texts), 'policy': POLICY,
                          'producer_sha256': file_hash(__file__), 'model_fingerprint': self.client.manifest['model_fingerprint']}
         self.identity['query_interpreter_fingerprint']=self.interpreter.fingerprint
-        if self.reranker is not None:
-            self.identity['reranker_fingerprint']=self.reranker.fingerprint
-        if facets:
-            from . import facets as facet_module
-            self.identity['facet_matcher_sha256']=file_hash(facet_module.__file__)
         if constraints:
             from . import constraints as constraint_module
             self.identity['constraint_matcher_sha256'] = file_hash(constraint_module.__file__)
@@ -242,8 +224,6 @@ class GroundedSearch:
         start = time.perf_counter()
         if type(k) is not int or not 1 <= k <= min(100, len(self.ids)):
             raise ValueError('Grounded k must be between 1 and min(100, catalog size)')
-        if self.reranker is not None and k>5:
-            raise ValueError('Source-aware reranking supports up to five returned items')
         if eligibility is not None and not isinstance(eligibility, EligibilitySnapshot):
             raise ValueError('Provide an EligibilitySnapshot')
         allowed = eligibility.validate_for(self.release_id, self.ids) if eligibility is not None else None
@@ -308,21 +288,16 @@ class GroundedSearch:
             else:
                 adjustment, explanations[i] = compatibility(plan, self.facts[i])
             values.append(retrieval[i] / 3. + adjustment)
-        order = stable_rank([self.ids[i] for i in candidates], np.asarray(values), min(10 if self.reranker is not None else k, len(candidates)))
+        order = stable_rank([self.ids[i] for i in candidates], np.asarray(values), min(k, len(candidates)))
         results = []
         for rank, offset in enumerate(order, 1):
             i = candidates[offset]
             results.append({'item_id': self.ids[i], 'merchant_id': self.records[i].merchant_id, 'rank': rank,
                 'score': float(values[offset]), 'score_kind': self.mode if self.facet_facts is not None or self.constraint_facts is not None else VERSION, 'name': self.records[i].metadata['name'],
                 'description': self.records[i].metadata.get('description', ''), 'explanation': explanations[i]})
-        reranking = None
-        if self.reranker is not None:
-            results,reranking=self.reranker.rank(query,plan,results,{r.item_id:r.metadata for r in self.records},k)
         response = {'query': query, 'mode': self.mode, 'release_id': self.release_id, 'results': results,
                     'interpretation': plan, 'scores_are_probabilities': False,
                     'timing_ms': {'total': (time.perf_counter() - start) * 1000}}
-        if reranking is not None:
-            response['reranking']=reranking
         if selection is not None:
             response['selection'] = selection
         if eligibility is not None:

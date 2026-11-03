@@ -6,7 +6,7 @@ from threading import BoundedSemaphore
 import time
 
 from .artifacts import load_current, load_release
-from .benchmark import expected_space, make_embedder, open_store, restored_prepared
+from .runtime import expected_space, make_embedder, open_store, restored_prepared
 from .catalog import load_catalog
 from .config import Config, ConfigError, load_config, token_counter
 from .eligibility import EligibilityError, EligibilitySnapshot
@@ -38,9 +38,9 @@ class SearchService:
         self.counter = token_counter(self.config)
         self.release_id = release_id
         self.embedder = None
-        if mode in {"grounded-local","grounded-rerank","grounded-facets","constraint-hybrid"}:
+        if mode in {"constraint-hybrid"}:
             from .grounded import GroundedSearch
-            self._grounded = GroundedSearch(self.config, release_id, allow_api=allow_api,rerank=mode=="grounded-rerank",facets=mode=="grounded-facets",constraints=mode=="constraint-hybrid")
+            self._grounded = GroundedSearch(self.config, release_id, allow_api=False, constraints=True)
             self.release_id = self._grounded.release_id
             self.mode = mode
             return
@@ -67,8 +67,8 @@ class SearchService:
             pointer = load_current(self.config.resolve("artifacts"))
         self.mode = mode
         parts = self.mode.split("-", 1)
-        if len(parts) != 2 or parts[0] not in {"semantic", "hybrid"} or parts[1] not in {"local", "small", "large"}:
-            raise ConfigError("Use lexical, semantic-{local,small,large}, or hybrid-{local,small,large}")
+        if len(parts) != 2 or parts[0] not in {"semantic", "hybrid"} or parts[1] != "local":
+            raise ConfigError("Use lexical, semantic-local, hybrid-local, or constraint-hybrid")
         self.retrieval_mode, self.family = parts
         if self.release_id is None:
             self.release_id = pointer["models"].get("semantic-" + self.family)
@@ -92,7 +92,7 @@ class SearchService:
 
     def _search(self, query: str, k: int, *, bypass_query_cache: bool,
                 eligibility: EligibilitySnapshot | None = None) -> dict:
-        if self.mode in {"grounded-local","grounded-rerank","grounded-facets","constraint-hybrid"}:
+        if self.mode in {"constraint-hybrid"}:
             text = prepare_query(query, self.counter, self.config["representation"]["query_token_cap"])
             return self._grounded.search(text, k, bypass_query_cache=bypass_query_cache, eligibility=eligibility)
         start = time.perf_counter()
