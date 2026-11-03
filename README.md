@@ -5,13 +5,24 @@ the query, scores all **4,997 distinct catalog items**, and returns the top `k`.
 Product vectors are prepared once. Search never calls a relevance judge.
 
 **Working now:** offline multilingual E5, BM25 and their RRF combination;
-100 queries × five results × three runs. **API spend: $0.** The OpenAI comparisons
-and blinded LLM evaluator are implemented but have not been run against live APIs.
-Relevance metrics remain unavailable; no winner or human validation is claimed.
-Semantic-local is the provisional default and has known qualitative misses.
+100 queries × five results × three local runs. The independent review implements
+a hosted-small comparison option and runs blinded evaluation through the assignment gateway;
+the full hosted embedding experiment was blocked by access denial.
+See the [review report](review/REPORT.md) for measured quality, coverage, spending
+and limitations. Semantic-local remains the incumbent until frozen development
+selection justifies a change; passing tests is not evidence of search quality.
 
-[Ranked results](results/selected-top5.csv) · [Measured results](docs/results.md) ·
-[Five-slide presentation](docs/presentation.pptx) · [Slide text](docs/slides.md)
+**Review verdict:** operational prototype, quality targets unmet. Frozen final
+E5 estimates are nDCG@5 **0.695**, Success@5 **47.1%**, MRR@5 **0.381**, and mandatory
+contradiction exposure **30.3%**. All 755 pooled pairs are judged after explicit
+adjudication, but repeat checks remain incomplete and no human calibration was
+available. No method earned promotion on development. The 180-test suite, fresh
+inference and exact 1,500-row replay pass. Conservative API spending is
+**$0.622962**, including uncertain calls; the existing $4.50 ceiling is unchanged.
+
+[Ranked results](review/evidence/selected-top5.csv) · [Independent review](review/REPORT.md) ·
+[Five-slide presentation](review/presentation/independent-review.pptx) ·
+[Evaluation protocol](review/EVALUATION.md)
 
 ## Quick start
 
@@ -34,8 +45,8 @@ python -m prosus_search search "pizza de queijo" --k 5
 
 On macOS/Linux activate with `source .venv/bin/activate`; use the same Python
 commands and copy the returned `build_manifest` path where needed. The lock file
-records the tested Windows/Python 3.12 environment. GitHub Actions also passes the
-offline fixture tests on Ubuntu; full-catalog timing was measured on Windows.
+records the tested Windows/Python 3.12 environment. The repository includes an
+Ubuntu CI workflow; this review ran locally on Windows.
 Alternatively use `pip install -e '.[local,dev]'` and record resolved
 versions. Setup downloads approximately 490 MB. Subsequent local operation needs
 no internet or API key.
@@ -67,7 +78,14 @@ for item in results["results"]:
 ```
 
 The convenience function `prosus_search.service.search(query, k=5)` also works;
-creating a fresh service for every request repeats loading.
+creating a fresh service for every request repeats loading. A service admits at
+most four simultaneous calls by default and raises `SearchBusyError` when full.
+Callers should use bounded backoff or an explicit overload response. One loaded
+service sustained about 334 fresh-inference queries/second with four callers on
+the review host **with query-cache lookup and persistence bypassed**. A separate
+900-query diagnostic measured about 81 QPS / 108 ms p95 for genuine cache misses
+including SQLite persistence. These synthetic local measurements are not a
+production SLA; see [the independent cache audit](review/evidence/independent-cache-audit.json).
 
 ## Preparation and comparison
 
@@ -91,51 +109,83 @@ fall back to another retrieval method.
 `config.toml` controls paths, model spaces, initial parameters and budgets; unknown
 keys fail. Paths resolve beside the file. Fixed benchmark builds verify input
 hashes and the grouped split. New data requires versioned hashes and an appropriate
-evaluation protocol. Direct lexical search can ingest a changed catalog; semantic
-search needs a rebuilt release. `--release` pins interactive search to a snapshot.
+evaluation protocol. Lexical search uses the same immutable current snapshot;
+before the first build it can ingest raw CSV. Changes require a rebuilt release.
+`--release` pins interactive search to a snapshot, including lexical mode; pair it
+with an explicit `--mode` when pinning a different model family from the current default.
 
 ## Hosted experiments and evaluation
 
-Configure `OPENAI_API_KEY` securely in the environment when available. Never put
-keys in source, Git, saved terminal commands or chat. Placeholder keys are rejected.
-Cached replay is the default; paid requests require `--allow-api`.
+Paste your API key after `OPENAI_API_KEY=` in the repository-root `.env` file
+(copy `.env.example` if needed), or set `OPENAI_API_KEY` in the environment.
+Configuration loading reads only that key from `.env` beside `config.toml`;
+an existing environment variable takes precedence. `.env` is ignored by Git,
+and its contents never enter saved configuration or manifests. Never put keys
+in tracked files, logs, saved terminal commands or chat. Placeholder keys are
+rejected. Cached replay is the default; paid requests require `--allow-api`.
+
+The supplied key belongs to **`https://lcm-litellm.prosus.com/`**, configured in
+`[api].base_url`. Gateway model names include `openai/`. Do not send that key to
+the direct OpenAI endpoint. The review verified root embedding calls and current
+judge inference; `/v1/models` lists models but can include deprecated entries.
+The originally suggested nano model rejected inference as deprecated. The
+versioned evaluator uses `openai/gpt-6-luna` and independent `openai/gpt-6-sol`
+checks with the Responses API. See the protocol for conservative prices and
+pilot corrections. Explicit endpoint/model/cache hashes prevent accidental reuse
+across providers.
 
 ```powershell
-$hosted = python -m prosus_search build --backend hosted --allow-api | ConvertFrom-Json
+$hosted = python -m prosus_search build --backend comparison --allow-api | ConvertFrom-Json
 $comparison = python -m prosus_search benchmark --build $hosted.build_manifest | ConvertFrom-Json
-python -m prosus_search evaluate --benchmark (Join-Path $comparison.output_directory 'benchmark.json') --allow-api
+$comparisonBenchmark = Join-Path $comparison.output_directory 'benchmark.json'
+python -m prosus_search evaluate --benchmark $comparisonBenchmark --pilot-only --allow-api
+python -m prosus_search evaluate --benchmark $comparisonBenchmark --judge-workers 4 --allow-api
 ```
 
-Five hosted configurations compare BM25, small/large embeddings and each hybrid
-with common evidence. SDK mechanics use synthetic tests; actual account access,
-live schema compatibility and hosted latency remain unverified. Fixtures never
-become dataset measurements.
+The optional comparison includes BM25, E5, hosted-small and each model's hybrid,
+using common evidence. **The review's hosted-small catalog build was blocked by
+gateway access denial after successful small probes; its partial index was not
+published or evaluated.** The judged review therefore compares the three complete
+local runs. `--backend local` needs no API; `--backend hosted` retains the separate
+small/large experiment. An incomplete build never changes the serving pointer.
+Hosted batches use 32 inputs; live failures remain charged conservatively.
+Fixtures never become dataset labels.
 
 Evaluation pools top-five candidates, hides system/rank/score, creates query-only
 intent cards and requests pointwise Portuguese source-backed grades. Validation
 checks exact quotes/scalars, requirement IDs and grade caps. Missing evidence
 differs from contradiction. Cached outputs and distinct replicate IDs support
 bounded repeat, equivalent-prompt, grader and independent intent-card checks.
-One retry total per logical assessment is budgeted; failures remain missing.
+One retry per primary assessment is budgeted. Exhausted invalid primary outputs
+receive a separately recorded independent-model adjudication, with at most two
+attempts. Originals remain intact, primary validity is reported separately, and
+unresolved failures remain missing. Diagnostic arms are never adjudicated.
 
 The frozen split has **30 development / 70 final queries**, grouped by intent.
 Final judging requires an explicit end-of-iteration decision and frozen selection.
-No final labels were generated. The CLI gate is procedural, not a security boundary.
-Human calibration remains an optional future enhancement.
+The CLI gate protects the holdout; it is procedural, not a security boundary or
+a renewed approval request. The review records whether final judging was released.
+Human calibration has not been performed.
 
 With valid labels, reports mark nDCG@5, Success@5, MRR@5 and constraint rates as
 **LLM-judged**. Incomplete pools use the common complete-query subset and keep
-full-split metrics null. No zero imputation, full-catalog recall claim or promotion
+full-split metrics null. Zero ideal gain gives undefined nDCG with its denominator;
+those queries remain in Success/MRR. No zero imputation, full-catalog recall claim or promotion
 from incomplete evidence. Bootstrap intervals condition on automated labels and
 do not measure judge accuracy. Frozen selection rules retain simplicity when
-differences are inconclusive; see [the protocol](protocols/README.md).
+differences are inconclusive; BM25 is eligible to win. See the
+[review protocol](review/EVALUATION.md).
 
 The persistent ledger reserves before requests and includes pending/uncertain
 charges. It stops at **$4.50**, leaving $0.50 untouched: $0.50 embeddings, $1.40
 development, $0.85 final, $1 Round 4 and $0.75 recovery. SDK retries are disabled;
-application retries reserve again. Never delete the ledger to bypass limits.
+application retries reserve again. Up to four independent judge calls can overlap;
+per-key locks prevent duplicate submissions and SQLite reservations enforce the
+same shared ceiling. Never delete the ledger to bypass limits.
 The ledger cannot observe unrelated account spending. Verify tariffs and remaining
-credit before paid execution.
+credit before paid execution. The user confirmed the key was unused with $5
+available and standard rates before the review's paid calls; the provider's budget
+route itself is blocked. Reported totals include failed/uncertain requests.
 
 ## Replay and tests
 
@@ -172,7 +222,8 @@ and trusted dietary facts require authoritative feeds. Consider ANN after measur
 latency/memory pressure; consider reranking only when judged candidates are useful
 but misordered. No server, vector database or UI is needed for this benchmark.
 
-[The frozen plan](docs/final-plan.md) remains authoritative, supplemented by
-[recorded execution decisions](docs/implementation-decisions.md). Round 4 has not
-begun. Send the GitHub link and setup instructions at least **one day before the
-interview**; the interview date was not provided.
+The independent review, protocol amendments, measured figures and durable
+[progress record](review/PROGRESS.md) live outside `docs/`, as requested. The
+latest user instruction authorizes implementation and iteration without the
+earlier round gates. Nothing was published or pushed. The assignment asks for
+the GitHub link at least **one day before the interview**; its date was not provided.
