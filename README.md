@@ -20,12 +20,22 @@ available. No method earned promotion on development. The 180-test suite, fresh
 inference and exact 1,500-row replay pass. Conservative API spending is
 **$0.622962**, including uncertain calls; the existing $4.50 ceiling is unchanged.
 
-**Current development cycle:** the first 11-variant comparison retains E5-small;
-none of the alternatives met the material-gain criteria. All 877 shared top-five
-pairs and the deeper diagnostic pool are judged. These are mixed-source LLM
-estimates with independent blinded checks, not human ground truth. Cumulative
-project API accounting is now **$0.691229**, including uncertainty. The original
-final set is already used; new experiments do not treat it as untouched.
+**Current development cycle:** the frozen v5 interpretation evaluation is complete:
+527 reading/item judgments plus40 independent repeats, with no retained ranking
+improvement. Incumbent primary-reading nDCG is **.590**, Success **7/30**;
+these changed judgments are not a change in rankings or comparable gains over
+the historical protocol. [Current decision](review/INTENT-DECISION-v5.md) and
+[every-query diagnosis](review/V5-QUERY-DIAGNOSIS.md) show limitations and alternate
+readings. New field/fusion experiments remain separate until fully evaluated.
+Cumulative project API accounting is **$0.691229**, including uncertainty.
+The original final set is already used; new experiments do not treat it as untouched.
+
+Loaded snapshots now isolate metadata, vectors, configuration and model identity.
+The repaired service passes417 tests and the fresh-inference audit. Its latest
+60-second, four-client genuine-miss test measures **62.76QPS**, **109.20ms p95**,
+zero errors and0.834GiB loaded memory; these are local library measurements.
+See [pipeline map](review/PIPELINE-AUDIT-v6.md), [measured runtime](review/PERFORMANCE-v6.md)
+and [candidate/abstention limits](review/CANDIDATES-AND-ABSTENTION-v6.md).
 [Acceptance criteria](review/ACCEPTANCE-v2.md), [experiment decisions](review/EXPERIMENTS-v2.md),
 [current progress](review/PROGRESS.md), [production path](review/PRODUCTION-PATH-v2.md)
 and [cost boundaries](review/COST-v2.md) distinguish demonstrated results from
