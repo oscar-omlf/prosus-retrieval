@@ -13,11 +13,12 @@ import math
 import os
 import re
 import time
+from threading import Lock
 from typing import Any, Callable, Mapping
 
 from .evaluation import assert_final_release, canonical_hash
 
-PROTOCOL_VERSION = "judge-v1"
+PROTOCOL_VERSION = "judge-v4-explicit-evidence-root"
 ALLOWED_FIELDS = ("name", "description", "category_name", "taxonomy", "tags", "vegan", "lacFree", "organic")
 STATUSES = ("comprovado", "não informado", "contradito", "não aplicável")
 
@@ -47,7 +48,9 @@ não resolvidas são desconhecidas. NOT_APPLICABLE não significa porção indiv
 O preço não tem moeda garantida; zero não comprova gratuidade. Não invente moeda
 nem trate preço numérico isolado como prova de uma exigência monetária específica.
 Para comprovação/contradição cite campo por JSON Pointer e trecho exato, ou escalar
-exato para booleano/número. Para texto use quote e scalar=null; para booleano/número
+exato. O ponteiro é relativo à raiz do objeto catalogo: use /name, /description,
+/taxonomy/l2 ou /tags/0/value/0, nunca inclua o prefixo /catalogo.
+Para booleano/número cite o escalar exato. Para texto use quote e scalar=null; para booleano/número
 use scalar e quote=null. Evidência desconhecida pode ter lista vazia. Não cite campos
 ausentes. Registre somente nota curta em português baseada em evidência, sem
 raciocínio privado. O catálogo fornece alegações, não verdade verificada."""
@@ -71,7 +74,9 @@ Não presuma moeda para o preço nem gratuidade quando seu valor é zero. Um nú
 de preço sozinho não comprova uma condição que exige uma moeda específica.
 Liste cada requisito como comprovado, não informado, contradito ou não aplicável.
 Apoie comprovação e contradição em JSON Pointer e citação textual exata (quote,
-scalar=null), ou booleano/número exato (scalar,quote=null). Não invente referências;
+com ponteiro relativo ao objeto catalogo: /name, /description, /taxonomy/l2 ou
+/tags/0/value/0; não use prefixo /catalogo),
+scalar=null, ou booleano/número exato (scalar,quote=null). Não invente referências;
 listas vazias servem para desconhecido. Escreva nota curta em português sobre a
 evidência, sem raciocínio privado. Alegações do catálogo não são verdade verificada."""
 
@@ -115,10 +120,11 @@ class JudgeConfig:
     input_micro_usd_per_token: str = "0.125"
     output_micro_usd_per_token: str = "0.50"
     input_token_cap: int = 3072
-    output_token_cap: int = 512
+    output_token_cap: int = 1024
     token_overhead: int = 128
     timeout_seconds: float = 60
     protocol_version: str = PROTOCOL_VERSION
+    base_url: str = "https://api.openai.com/v1/"
 
     @classmethod
     def secondary(cls) -> "JudgeConfig":
@@ -358,7 +364,7 @@ def _safe_error(exc: Exception) -> tuple[str, bool, float]:
 
 
 class JudgeClient:
-    """One API attempt at a time, exact payload cache, at most one total retry.
+    """One attempt per operation key, exact payload cache, one total retry.
 
     ``provider`` may be an OpenAI client or a callable accepting a request dict.
     ``token_counter`` counts the full serialized request; an extra allowance is
@@ -375,6 +381,7 @@ class JudgeClient:
         self.token_counter = token_counter
         self.sleeper = sleeper
         self.final_authorization = final_authorization
+        self._provider_lock = Lock()
 
     def make_card(self, query_id: str, query: str, *, replicate_id: str = "primary-card", bucket: str = "development") -> dict:
         card_id = "c_" + canonical_hash([query_id, query, replicate_id, self.config.protocol_version])[:24]
@@ -399,15 +406,19 @@ class JudgeClient:
                 "output_token_cap": self.config.output_token_cap, "reservation_micro_usd": self.config.reservation_micro_usd}
 
     def _request(self, payload: dict) -> Any:
+        with self._provider_lock:
+            self._initialize_provider()
+        return self.provider(payload) if callable(self.provider) else self.provider.responses.create(**payload)
+
+    def _initialize_provider(self) -> None:
         if self.provider is None:
             _require_real_key()
             for name in ("openai", "httpx", "httpcore", "httpx2", "httpcore2"):
                 logging.getLogger(name).setLevel(logging.WARNING)
             from openai import OpenAI
-            self.provider = OpenAI(max_retries=0, timeout=self.config.timeout_seconds)
+            self.provider = OpenAI(base_url=self.config.base_url, max_retries=0, timeout=self.config.timeout_seconds)
             for name in ("openai", "httpx", "httpcore", "httpx2", "httpcore2"):
                 logging.getLogger(name).setLevel(logging.WARNING)
-        return self.provider(payload) if callable(self.provider) else self.provider.responses.create(**payload)
 
     def _execute(self, payload: dict, replicate_id: str, bucket: str, purpose: str,
                  validator: Callable[[dict], dict]) -> dict:
@@ -433,7 +444,7 @@ class JudgeClient:
         # reservation or logical attempt is created for that condition.
         if self.provider is None:
             _require_real_key()
-        with self.store.api_writer():
+        with self.store.api_writer(scope=key):
             record = self.store.lookup(key) or {"status": "missing", "value": None, "attempts": [],
                 "cache_key": key, "payload": payload, "payload_hash": canonical_hash(payload),
                 "protocol_hash": protocol_hash(self.config), "replicate_id": replicate_id,
@@ -458,7 +469,10 @@ class JudgeClient:
                 except Exception as exc:
                     self.store.mark_uncertain(charge_id)
                     reason, retry_allowed, delay = _safe_error(exc)
-                    attempt.update(state="uncertain", elapsed_seconds=time.perf_counter() - started, error_code=reason)
+                    status_code = getattr(exc, "status_code", None)
+                    attempt.update(state="uncertain", elapsed_seconds=time.perf_counter() - started, error_code=reason,
+                                   http_status=status_code if type(status_code) is int else None,
+                                   error_type=type(exc).__name__)
                     record.update(reason=reason, retry_allowed=retry_allowed)
                     self.store.put(key, record)
                     if retry_allowed and len(record["attempts"]) < 2:

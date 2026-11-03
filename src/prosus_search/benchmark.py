@@ -100,23 +100,27 @@ def expected_space(config: Config, family: str) -> tuple[str, int, str]:
     if family not in config["models"]:
         raise ConfigError(f"Unknown model family: {family}")
     model = config["models"][family]
-    return model["model"], model["dimensions"], model["epoch"]
+    # A compatible gateway can map an alias to a different upstream model.
+    # Bind serving releases to the same endpoint as the embedding cache.
+    epoch = model["epoch"] + ":endpoint:" + content_hash(config["api"]["base_url"])
+    return model["model"], model["dimensions"], epoch
 
 
 def make_embedder(config: Config, store: Store, family: str, count, *, allow_api: bool = False):
     if family == "local":
         return local_client(config, store)
-    return EmbeddingClient(store, EmbeddingConfig(**config["models"][family]), count, allow_api=allow_api)
+    return EmbeddingClient(store, EmbeddingConfig(**config["models"][family],
+                            base_url=config["api"]["base_url"]), count, allow_api=allow_api)
 
 
 def build(config: Config, *, backend: str = "local", allow_api: bool = False) -> dict:
-    if backend not in {"local", "hosted"}:
-        raise ConfigError("Build backend must be local or hosted")
+    if backend not in {"local", "hosted", "comparison"}:
+        raise ConfigError("Build backend must be local, hosted or comparison")
     started = time.perf_counter()
     audit = preflight(config)
     _, prepared, queries, count = load_inputs(config)
     store = open_store(config)
-    families = ("local",) if backend == "local" else ("small", "large")
+    families = ("local", "small") if backend == "comparison" else ("local",) if backend == "local" else ("small", "large")
     release_ids, models = {}, {}
     query_texts = [prepare_query(query.text, count, config["representation"]["query_token_cap"]) for query in queries]
     for family in families:
@@ -147,7 +151,7 @@ def build(config: Config, *, backend: str = "local", allow_api: bool = False) ->
                           "elapsed_seconds": time.perf_counter() - model_start,
                           "matrix_bytes": int(vectors.nbytes)}
         del vectors, embedder
-    default = "semantic-local" if backend == "local" else "semantic-small"
+    default = "semantic-local" if backend in {"local", "comparison"} else "semantic-small"
     # Publish only after every requested model has completed and validated.
     pointer = publish_current(config.resolve("artifacts"), release_ids, default_mode=default)
     manifest = {"schema_version": 1, "created_at": utc_now(), "backend": backend,

@@ -1,4 +1,7 @@
 # No credentials belong in this file. Hosted calls require --allow-api.
+[api]
+base_url = "https://lcm-litellm.prosus.com/"
+
 [paths]
 catalog = "5k_items_curated.csv"
 queries = "queries.csv"
@@ -32,13 +35,13 @@ batch_size = 16
 threads = 6
 
 [models.small]
-model = "text-embedding-3-small"
+model = "openai/text-embedding-3-small"
 dimensions = 1536
 input_rate_per_million = "0.02"
 epoch = "v1"
 
 [models.large]
-model = "text-embedding-3-large"
+model = "openai/text-embedding-3-large"
 dimensions = 3072
 input_rate_per_million = "0.13"
 epoch = "v1"
@@ -54,7 +57,7 @@ recovery = 750000
 [evaluation]
 seed = 20261102
 bootstrap_replicates = 2000
-primary_model = "gpt-6-luna"
-secondary_model = "gpt-6-sol"
+primary_model = "openai/gpt-6-luna"
+secondary_model = "openai/gpt-6-sol"
 input_token_cap = 3072
-output_token_cap = 512
+output_token_cap = 1024

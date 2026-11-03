@@ -12,6 +12,7 @@ from typing import Any, Callable, Sequence
 import numpy as np
 
 from .store import Store, content_hash, cost_micro_usd, utc_now
+from .config import validate_base_url
 
 
 class EmbeddingError(RuntimeError):
@@ -33,12 +34,14 @@ class EmbeddingConfig:
     input_rate_per_million: float
     epoch: str = "v1"
     provider: str = "openai"
-    batch_size: int = 64
+    batch_size: int = 32
     batch_token_limit: int = 32_768
     build_timeout: float = 60.0
     interactive_timeout: float = 10.0
+    base_url: str = "https://api.openai.com/v1/"
 
     def __post_init__(self) -> None:
+        validate_base_url(self.base_url)
         if not self.model or not self.epoch or self.provider != "openai":
             raise ValueError("Hosted embeddings require an explicit OpenAI model and cache epoch")
         if type(self.dimensions) is not int or self.dimensions <= 0:
@@ -53,6 +56,7 @@ class EmbeddingConfig:
 def embedding_cache_key(text: str, config: EmbeddingConfig, representation_version: str) -> str:
     return "embedding:" + content_hash({
         "schema": 1, "provider": config.provider, "model": config.model,
+        "base_url": config.base_url,
         "dimensions": config.dimensions, "epoch": config.epoch,
         "representation_version": representation_version,
         "text_hash": hashlib.sha256(text.encode("utf-8")).hexdigest(),
@@ -145,7 +149,8 @@ class EmbeddingClient:
         for logger in ("openai", "httpx", "httpcore", "httpx2", "httpcore2"):
             logging.getLogger(logger).setLevel(logging.WARNING)
         try:
-            self._provider = OpenAI(api_key=key, max_retries=0, timeout=self.config.build_timeout)
+            self._provider = OpenAI(api_key=key, base_url=self.config.base_url,
+                                    max_retries=0, timeout=self.config.build_timeout)
         except Exception:
             raise EmbeddingError("Cannot initialize the OpenAI client; check the installed SDK and environment configuration") from None
         return self._provider

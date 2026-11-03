@@ -23,7 +23,7 @@ def parser() -> argparse.ArgumentParser:
     setup.add_argument("--local-model", action="store_true", help="download pinned E5 ONNX weights (~490 MB)")
     commands.add_parser("preflight", help="validate inputs, token limits, frozen split and estimated costs")
     make = commands.add_parser("build", help="prepare and publish immutable catalog releases")
-    make.add_argument("--backend", choices=("local", "hosted"), default="local")
+    make.add_argument("--backend", choices=("local", "hosted", "comparison"), default="local")
     make.add_argument("--allow-api", action="store_true")
     bench = commands.add_parser("benchmark", help="rank all 100 queries from an explicit build manifest")
     bench.add_argument("--build", required=True, help="immutable build JSON returned by build")
@@ -38,6 +38,8 @@ def parser() -> argparse.ArgumentParser:
     judge = commands.add_parser("evaluate", help="blinded development judging; final work needs its separate release gate")
     judge.add_argument("--benchmark", required=True, help="benchmark.json path")
     judge.add_argument("--allow-api", action="store_true")
+    judge.add_argument("--pilot-only", action="store_true", help="stop after the five frozen development pilot queries")
+    judge.add_argument("--judge-workers", type=int, default=1, help="1..4 independent judge requests; pilots remain serial")
     judge.add_argument("--dry-run", action="store_true", help="pool and report missing labels without model calls")
     judge.add_argument("--phase", choices=("development", "final"), default="development")
     judge.add_argument("--selection", help="frozen selection JSON required for final evaluation")
@@ -102,7 +104,8 @@ def _evaluate(config, args):
                                 allow_api=args.allow_api, phase=args.phase, selection=selection,
                                 release_final=args.release_final, round4_complete=args.round4_complete,
                                 iteration_declined=args.iteration_declined,
-                                evaluation_config=config["evaluation"])
+                                evaluation_config=config["evaluation"], base_url=config["api"]["base_url"],
+                                pilot_only=args.pilot_only, judge_workers=args.judge_workers)
     write_json(output, result)
     return {"evaluation_path": str(output), "status": result.get("status"),
             "phase": args.phase, "budget": open_store(config).summary()}

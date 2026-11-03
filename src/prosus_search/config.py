@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import tomllib
+from urllib.parse import urlsplit
 from typing import Any
 
 from dotenv import dotenv_values
@@ -19,6 +20,7 @@ class ConfigError(ValueError):
 
 
 _KEYS = {
+    "api": {"base_url"},
     "paths": {"catalog", "queries", "state", "artifacts", "model_dir", "split", "outputs", "tokenizer_cache"},
     "data": {"catalog_sha256", "queries_sha256"},
     "representation": {"version", "item_token_cap", "query_token_cap"},
@@ -60,6 +62,7 @@ def load_config(path: str | Path = "config.toml") -> Config:
             raise ConfigError(f"Missing or unknown keys in [{section}]")
     if set(values["models"]) != {"small", "large"}:
         raise ConfigError("Expected exactly small and large hosted model configurations")
+    validate_base_url(values["api"]["base_url"])
     for name, model in values["models"].items():
         if set(model) != _MODEL_KEYS:
             raise ConfigError(f"Missing or unknown keys in [models.{name}]")
@@ -108,6 +111,15 @@ def load_config(path: str | Path = "config.toml") -> Config:
         if api_key:
             os.environ["OPENAI_API_KEY"] = api_key
     return Config(source, values)
+
+
+def validate_base_url(value: str) -> None:
+    """Persist only an explicit HTTPS endpoint, never embedded credentials."""
+    if not isinstance(value, str):
+        raise ConfigError("API base_url must be an HTTPS URL without credentials, query or fragment")
+    parts = urlsplit(value)
+    if parts.scheme != "https" or not parts.hostname or parts.username or parts.password or parts.query or parts.fragment:
+        raise ConfigError("API base_url must be an HTTPS URL without credentials, query or fragment")
 
 
 def token_counter(config: Config, *, allow_download: bool = False):
