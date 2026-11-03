@@ -26,6 +26,7 @@ pydantic==2.14.2
 pydantic_core==2.50.2
 Pygments==2.21.0
 pytest==9.2.0
+python-dotenv==1.2.4
 PyYAML==6.0.3
 regex==2026.9.29
 requests==2.34.2

@@ -11,6 +11,8 @@ import re
 import tomllib
 from typing import Any
 
+from dotenv import dotenv_values
+
 
 class ConfigError(ValueError):
     pass
@@ -99,6 +101,12 @@ def load_config(path: str | Path = "config.toml") -> Config:
         raise ConfigError("The untouched $0.50 reserve cannot be allocated")
     if sum(value for key, value in budget.items() if key != "global_micro_usd") > budget["global_micro_usd"]:
         raise ConfigError("Bucket allocations exceed the global ceiling")
+    # Only the API key is imported; secrets never enter config values/digests or
+    # manifests. Resolve beside the explicit config, without searching parents.
+    if "OPENAI_API_KEY" not in os.environ:
+        api_key = dotenv_values(source.with_name(".env"), interpolate=False).get("OPENAI_API_KEY")
+        if api_key:
+            os.environ["OPENAI_API_KEY"] = api_key
     return Config(source, values)
 
 
