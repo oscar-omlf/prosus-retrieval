@@ -9,6 +9,7 @@ from .artifacts import load_current, load_release
 from .benchmark import expected_space, make_embedder, open_store, restored_prepared
 from .catalog import load_catalog
 from .config import Config, ConfigError, load_config, token_counter
+from .eligibility import EligibilityError, EligibilitySnapshot
 from .representation import prepare_catalog, prepare_query
 from .retrieval import SearchEngine
 
@@ -70,40 +71,55 @@ class SearchService:
         self.engine = SearchEngine(restored_prepared(release), release.vectors, **self.config["retrieval"])
         self.embedder = make_embedder(self.config, open_store(self.config), self.family, self.counter, allow_api=allow_api)
 
-    def search(self, query: str, k: int = 5, *, bypass_query_cache: bool = False) -> dict:
+    def search(self, query: str, k: int = 5, *, bypass_query_cache: bool = False,
+               eligibility: EligibilitySnapshot | None = None) -> dict:
         if not self._admission.acquire(blocking=False):
             raise SearchBusyError("Search concurrency limit reached; retry later with bounded backoff")
         try:
-            return self._search(query, k, bypass_query_cache=bypass_query_cache)
+            return self._search(query, k, bypass_query_cache=bypass_query_cache, eligibility=eligibility)
         finally:
             self._admission.release()
 
-    def _search(self, query: str, k: int, *, bypass_query_cache: bool) -> dict:
+    def _search(self, query: str, k: int, *, bypass_query_cache: bool,
+                eligibility: EligibilitySnapshot | None = None) -> dict:
         start = time.perf_counter()
         if type(k) is not int or not 1 <= k <= len(self.engine.ids):
             raise ConfigError(f"k must be an integer between 1 and {len(self.engine.ids)}")
         if self.retrieval_mode == "hybrid" and k > min(len(self.engine.ids), self.engine.rrf_depth):
             raise ConfigError(f"Interactive hybrid search supports k up to {min(len(self.engine.ids), self.engine.rrf_depth)} at its fixed candidate depth")
         text = prepare_query(query, self.counter, self.config["representation"]["query_token_cap"])
+        allowed = None
+        if eligibility is not None:
+            if not isinstance(eligibility, EligibilitySnapshot):
+                raise EligibilityError("Provide an immutable EligibilitySnapshot")
+            allowed = eligibility.validate_for(self.release_id, self.engine.ids)
         vector = None
         embed_start = time.perf_counter()
-        if self.embedder is not None:
+        if self.embedder is not None and (allowed is None or allowed):
             options = {"kind": "query"} if self.family == "local" else {"interactive": True}
             vector = self.embedder.embed([text], representation_version="query-v1",
                                          bypass_cache=bypass_query_cache, **options)[0]
         embedding_seconds = time.perf_counter() - embed_start
         score_start = time.perf_counter()
-        results = self.engine.search(text, vector, mode=self.retrieval_mode, k=k)
+        results = () if allowed is not None and not allowed else self.engine.search(
+            text, vector, mode=self.retrieval_mode, k=k, eligible_ids=allowed)
         scoring_seconds = time.perf_counter() - score_start
-        return {"query": query, "mode": self.mode, "release_id": self.release_id,
+        response = {"query": query, "mode": self.mode, "release_id": self.release_id,
                 "results": [asdict(item) for item in results],
                 "timing_ms": {"embedding": embedding_seconds * 1000,
                               "scoring": scoring_seconds * 1000,
                               "total": (time.perf_counter() - start) * 1000},
                 "scores_are_probabilities": False}
+        if eligibility is not None:
+            # A list that expires during inference must not authorize a response.
+            eligibility.assert_fresh()
+            response["eligibility"] = {"revision": eligibility.revision,
+                "context_id": eligibility.context_id, "valid_until": eligibility.valid_until,
+                "eligible_count": len(allowed)}
+        return response
 
 
 def search(query: str, k: int = 5, *, config: str = "config.toml", mode: str | None = None,
-           allow_api: bool = False) -> dict:
+           allow_api: bool = False, eligibility: EligibilitySnapshot | None = None) -> dict:
     """Convenience call. Reuse SearchService for repeated queries and lower latency."""
-    return SearchService(config, mode=mode, allow_api=allow_api).search(query, k)
+    return SearchService(config, mode=mode, allow_api=allow_api).search(query, k, eligibility=eligibility)

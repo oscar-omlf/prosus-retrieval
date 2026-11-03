@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 from threading import Lock
-from typing import Sequence
+from typing import Collection, Sequence
 
 import numpy as np
 
@@ -29,6 +29,7 @@ class ScoreBundle:
     dense_ranks: np.ndarray | None = None
     lexical_ranks: np.ndarray | None = None
     candidate_count: int = 0
+    eligible_rows: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -223,20 +224,41 @@ class SearchEngine:
         self._lexical_lock = Lock()
 
     def _ranks(self, scores: np.ndarray, *, depth: int | None = None,
-               positive_only: bool = False) -> np.ndarray:
-        order = _topk_canonical(scores, min(depth or len(self.ids), len(self.ids)))
+               positive_only: bool = False, eligible_rows: np.ndarray | None = None) -> np.ndarray:
+        if eligible_rows is None:
+            order = _topk_canonical(scores, min(depth or len(self.ids), len(self.ids)))
+        elif len(eligible_rows):
+            order = eligible_rows[_topk_canonical(scores[eligible_rows], min(depth or len(eligible_rows), len(eligible_rows)))]
+        else:
+            order = eligible_rows
         if positive_only:
             order = order[scores[order] > 0]
         ranks = np.zeros(len(self.ids), dtype=np.int32)
         ranks[order] = np.arange(1, len(order) + 1)
         return ranks
 
+    def _eligible_rows(self, eligible_ids: Collection[str] | None) -> np.ndarray | None:
+        if eligible_ids is None:
+            return None
+        if isinstance(eligible_ids, str):
+            raise RetrievalError("Eligible IDs must be a collection, not text")
+        try:
+            allowed = frozenset(eligible_ids)
+        except TypeError:
+            raise RetrievalError("Eligible IDs must be a collection of item IDs") from None
+        if not allowed.issubset(self.ids):
+            raise RetrievalError("Eligible IDs are absent from this catalog")
+        # Canonical order preserves ID tie-breaking within the eligible universe.
+        return np.fromiter((i for i, item_id in enumerate(self.ids) if item_id in allowed), dtype=np.int64)
+
     def score(self, query: str, query_vector: np.ndarray | None = None, mode: str = "semantic",
-              *, include_ranks: bool = True) -> ScoreBundle:
+              *, include_ranks: bool = True, eligible_ids: Collection[str] | None = None) -> ScoreBundle:
         if mode not in {"semantic", "lexical", "hybrid"}:
             raise RetrievalError(f"unsupported retrieval mode {mode!r}")
         if not normalize_text(query):
             raise RetrievalError("query must not be blank")
+        eligible_rows = self._eligible_rows(eligible_ids)
+        candidate_count = len(self.ids) if eligible_rows is None else len(eligible_rows)
         dense = lexical = None
         if mode in {"semantic", "hybrid"}:
             if self.vectors is None or query_vector is None:
@@ -250,12 +272,14 @@ class SearchEngine:
             lexical = self._lexical.score(query)
         if mode == "semantic":
             return ScoreBundle(dense, "cosine", dense_scores=dense,
-                               dense_ranks=self._ranks(dense) if include_ranks else None, candidate_count=len(self.ids))
+                               dense_ranks=self._ranks(dense, eligible_rows=eligible_rows) if include_ranks else None,
+                               candidate_count=candidate_count, eligible_rows=eligible_rows)
         if mode == "lexical":
             return ScoreBundle(lexical, "bm25_lucene", lexical_scores=lexical,
-                               lexical_ranks=self._ranks(lexical) if include_ranks else None, candidate_count=len(self.ids))
-        dense_ranks = self._ranks(dense, depth=self.rrf_depth)
-        lexical_ranks = self._ranks(lexical, positive_only=True, depth=self.rrf_depth)
+                               lexical_ranks=self._ranks(lexical, eligible_rows=eligible_rows) if include_ranks else None,
+                               candidate_count=candidate_count, eligible_rows=eligible_rows)
+        dense_ranks = self._ranks(dense, depth=self.rrf_depth, eligible_rows=eligible_rows)
+        lexical_ranks = self._ranks(lexical, positive_only=True, depth=self.rrf_depth, eligible_rows=eligible_rows)
         scores = np.zeros(len(self.ids), dtype=np.float64)
         for ranks in (dense_ranks, lexical_ranks):
             present = ranks > 0
@@ -263,19 +287,29 @@ class SearchEngine:
         return ScoreBundle(
             scores, "rrf", dense, lexical,
             dense_ranks, lexical_ranks,
-            int(np.count_nonzero(scores)),
+            int(np.count_nonzero(scores)), eligible_rows,
         )
 
     def search(
-        self, query: str, query_vector: np.ndarray | None = None, mode: str = "semantic", k: int = 5
+        self, query: str, query_vector: np.ndarray | None = None, mode: str = "semantic", k: int = 5,
+        *, eligible_ids: Collection[str] | None = None,
     ) -> tuple[RankedItem, ...]:
         _positive_integer(k, "k")
         if k > len(self.ids):
             raise RetrievalError(f"k={k} exceeds catalog size {len(self.ids)}")
-        bundle = self.score(query, query_vector, mode, include_ranks=False)
-        if k > bundle.candidate_count:
+        bundle = self.score(query, query_vector, mode, include_ranks=False, eligible_ids=eligible_ids)
+        if k > bundle.candidate_count and eligible_ids is None:
             raise RetrievalError(f"k={k} exceeds {bundle.candidate_count} candidates at fixed RRF depth {self.rrf_depth}")
-        order = _topk_canonical(bundle.scores, k)
+        if bundle.eligible_rows is None:
+            order = _topk_canonical(bundle.scores, k)
+        else:
+            count = min(k, bundle.candidate_count)
+            if count == 0:
+                return ()
+            candidates = bundle.eligible_rows
+            if mode == "hybrid":
+                candidates = candidates[bundle.scores[candidates] > 0]
+            order = candidates[_topk_canonical(bundle.scores[candidates], count)]
         results = []
         for rank, index in enumerate(order, start=1):
             record = self.prepared.items[index].record
