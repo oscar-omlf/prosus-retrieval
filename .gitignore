@@ -233,3 +233,6 @@ __marimo__/
 !.env.example
 /.storage-smoke-*/
 /.test-tmp/
+
+# Office creates private lock files while a presentation is open.
+~$*.pptx

@@ -6,6 +6,7 @@
 *.md text eol=lf
 *.mjs text eol=lf
 *.yml text eol=lf
+.githooks/* text eol=lf
 results/*.csv whitespace=cr-at-eol
 review/evidence/*.csv whitespace=cr-at-eol
 # Matplotlib emits trailing spaces inside SVG path data.
