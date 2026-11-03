@@ -25,13 +25,17 @@ requires `--allow-api` and the existing cumulative budget ledger.
 See [the acceptance and evaluation protocol](review/CONSTRAINT-SEARCH.md).
 
 Constraint-hybrid status (2026-11-04): [all 500 predictions](review/evidence/constraint-top5-100.csv)
-are exported and 91 focused tests pass. The complete 578-pair development pool
+are exported and 92 focused tests pass. The complete 578-pair development pool
 gives nDCG@5 .644 versus .660 for grounded-local; no reliable gain is established.
-Fresh judging has 175/274 pairs completed, with 99 primary judgments and 20
-independent checks remaining. Two inference attempts returned HTTP403, including
-the user-authorized retry; no full held-out metric is claimed. Conservative
-cumulative API spend is $1.688449 of the unchanged $4.50 ceiling. See the linked
-report for protocol amendments, limitations, receipts and reproducible commands.
+Fresh judging is complete: 274 pooled pairs over 30 new synthetic queries plus
+20 independent checks. Constraint-hybrid / grounded-local / semantic-local
+nDCG@5 is **.778 / .702 / .669** on 25 queries with defined nDCG; Success@5 is
+**20 / 17 / 17 out of 30**. The paired candidate-versus-grounded 95% interval
+includes zero; the default remains unchanged. After gateway HTTP403 failures,
+the user-authorized official OpenAI fallback completed the missing judgments.
+Cumulative conservative API spend is **$1.804028 / $4.50**. All 500 exported IDs
+also match actual HTTP serving. See [final evidence](review/evidence/constraint-final30.json)
+and the linked report for model-label limitations, routing provenance and replay.
 Historical experiment sections below retain their original accounting snapshots.
 
 An experimental grounded method is explicitly selectable with
