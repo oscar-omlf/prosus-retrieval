@@ -1,6 +1,5 @@
-"""Grounded, local product search; catalog-derived lexical interpretation, not an LLM.
+"""Grounded product search with cached, budgeted semantic query understanding.
 
-This deliberately bounded parser cannot resolve arbitrary semantic ambiguity.
 Historical options never establish ingredients or current availability.
 """
 from __future__ import annotations
@@ -25,13 +24,13 @@ from .representation import lexical_tokens, normalize_text, portion_claims
 from .retrieval import LexicalIndex, normalize_vectors, stable_rank
 from .snapshots import freeze_json
 
-VERSION = 'grounded-local-v1'
+VERSION = 'grounded-semantic-v2'
 STOP = frozenset('a o as os de da do das dos em na no nas nos e para por um uma uns umas ao aos que seu sua'.split())
 GENERIC = frozenset('outro outros geral gerais alimento alimentos preparado preparados prato pratos categoria categoriais'.split())
 PREPARATIONS = ('frito', 'assado', 'grelhado', 'empanado', 'crocante', 'cozido', 'defumado')
 POLICY = {'candidate_depth': 100, 'rrf_constant': 60, 'type_match': 1.0,
           'type_mismatch_signal': -.75, 'requirement_match': .30,
-          'explicit_contradiction': -.80, 'preference_match': .10}
+          'explicit_contradiction': -.80, 'preference_match': .10, 'domain_match': .75}
 
 
 @lru_cache(maxsize=50000)
@@ -71,6 +70,9 @@ def product(record):
     evidence.extend({'path': '/' + re.sub(r'\[(\d+)\]', r'/\1', claim.field_path).replace('.', '/'), 'quote': claim.raw_value}
                     for claim in portion_claims(record))
     return freeze_json({'item_id': record.item_id, 'text': text, 'identity': m['name'] + ' / ' + selected[1],
+        'domain': ('prepared_food' if taxonomy.get('l0') == 'ALIMENTOS_PREPARADOS' else
+                   'grocery' if taxonomy.get('l0') in {'BEBIDAS','MERCEARIA','FLV','BOMBONIERE','FRIOS_LATICINIOS','PROTEINAS'} else
+                   'unknown' if taxonomy.get('l0') in {None,'','OUTROS'} else 'retail'),
         'type_keys': sorted(set().union(*(keys(value) for _, value in type_sources)) - GENERIC_KEYS),
         'name_keys': sorted(keys(m['name'])), 'base_keys': sorted(keys(m['name'] + ' ' + description)),
         'explicit_text': m['name'] + '\n' + m.get('description', ''),
@@ -152,13 +154,18 @@ def compatibility(plan, facts):
         adjustment += POLICY['type_mismatch_signal']
     adjustment += POLICY['requirement_match'] * supported + POLICY['explicit_contradiction'] * contradictions
     adjustment += POLICY['preference_match'] * preference
+    domain = plan.get('domain','unknown')
+    domain_match = None if 'unknown' in (domain,facts['domain']) else domain == facts['domain']
+    if domain_match is not None:
+        adjustment += POLICY['domain_match'] * (1 if domain_match else -1)
     return adjustment, {'type_lexical_coverage': type_match, 'requirements': statuses,
+                        'domain_match':domain_match,
                         'unknown_requirements': sum(r['status'] == 'unknown' for r in statuses),
                         'historical_options_used_as_evidence': False}
 
 
 class GroundedSearch:
-    def __init__(self, config, baseline_release_id=None):
+    def __init__(self, config, baseline_release_id=None, *, allow_api=False):
         self.config = config
         baseline_release_id = baseline_release_id or load_current(config.resolve('artifacts'))['models']['semantic-local']
         anchor = load_release(config.resolve('artifacts'), baseline_release_id,
@@ -170,11 +177,14 @@ class GroundedSearch:
         self.ids = anchor.ids
         self.facts = tuple(product(record) for record in self.records)
         self.vocabulary = frozenset().union(*(set(f['type_keys']) | set(f['name_keys']) for f in self.facts))
+        from .understanding import SemanticInterpreter
+        self.interpreter = SemanticInterpreter(config,allow_api=allow_api)
         self.client = local_client(config, open_store(config))
         texts = [f['text'] for f in self.facts]
         self.identity = {'version': VERSION, 'source_hash': catalog.source_hash, 'anchor': baseline_release_id,
                          'representation_hash': canonical_hash(texts), 'policy': POLICY,
                          'producer_sha256': file_hash(__file__), 'model_fingerprint': self.client.manifest['model_fingerprint']}
+        self.identity['query_interpreter_fingerprint']=self.interpreter.fingerprint
         self.release_id = canonical_hash(self.identity)
         matrix_identity = {'representation_hash': self.identity['representation_hash'],
                            'model_fingerprint': self.identity['model_fingerprint']}
@@ -204,15 +214,19 @@ class GroundedSearch:
         if eligibility is not None and not isinstance(eligibility, EligibilitySnapshot):
             raise ValueError('Provide an EligibilitySnapshot')
         allowed = eligibility.validate_for(self.release_id, self.ids) if eligibility is not None else None
-        plan = interpret(query, self.vocabulary)
         eligible = np.asarray([i for i, item_id in enumerate(self.ids) if allowed is None or item_id in allowed], dtype=np.int64)
         if not len(eligible):
-            response = {'query': query, 'mode': 'grounded-local', 'release_id': self.release_id, 'results': [], 'interpretation': plan, 'scores_are_probabilities': False}
+            response = {'query': query, 'mode': 'grounded-local', 'release_id': self.release_id, 'results': [], 'scores_are_probabilities': False}
             if eligibility is not None:
                 eligibility.assert_fresh()
                 response['eligibility'] = {'revision': eligibility.revision, 'context_id': eligibility.context_id,
                     'valid_until': eligibility.valid_until, 'eligible_count': 0}
             return response
+        raw_plan = self.interpreter.interpret(query)
+        identity = interpret(raw_plan['identity'], self.vocabulary)
+        plan = {'original':query, 'identity_phrase':raw_plan['identity'], 'identity_keys':identity['identity_keys'],
+                **{key:raw_plan[key] for key in ('canonical','domain','requirements','preferences','ambiguity','alternatives')},
+                'interpreter':'query-only LLM; cached budgeted structured output; no evaluation inputs'}
         vectors = self.client.embed([plan['original'], plan['canonical']], representation_version=VERSION + '-query', kind='query', bypass_cache=bypass_query_cache)
         dense = self.vectors @ normalize_vectors(vectors).T
         lexical = self.lexical.score(plan['original'])

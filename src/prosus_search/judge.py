@@ -373,7 +373,9 @@ class JudgeClient:
     def __init__(self, store: Any, *, config: JudgeConfig | None = None, allow_api: bool = False,
                  provider: Any = None, token_counter: Callable[[str], int] | None = None,
                  sleeper: Callable[[float], None] = time.sleep,
-                 final_authorization: Mapping[str, Any] | None = None):
+                 final_authorization: Mapping[str, Any] | None = None, max_attempts: int = 2):
+        if type(max_attempts) is not int or not 1 <= max_attempts <= 2:
+            raise ValueError("max_attempts must be 1 or 2")
         self.store = store
         self.config = config or JudgeConfig()
         self.allow_api = allow_api
@@ -381,6 +383,7 @@ class JudgeClient:
         self.token_counter = token_counter
         self.sleeper = sleeper
         self.final_authorization = final_authorization
+        self.max_attempts = max_attempts
         self._provider_lock = Lock()
 
     def make_card(self, query_id: str, query: str, *, replicate_id: str = "primary-card", bucket: str = "development") -> dict:
@@ -454,7 +457,7 @@ class JudgeClient:
                 return {**record, "cache_hit": True}
             if record.get("retry_allowed") is False:
                 return {**record, "cache_hit": True}
-            while len(record["attempts"]) < 2:
+            while len(record["attempts"]) < self.max_attempts:
                 charge_id = self.store.reserve(bucket, self.config.reservation_micro_usd,
                     metadata={"purpose": purpose, "model": self.config.model, "payload_hash": record["payload_hash"],
                               "replicate_id": replicate_id, "attempt": len(record["attempts"]) + 1})
@@ -475,7 +478,7 @@ class JudgeClient:
                                    error_type=type(exc).__name__)
                     record.update(reason=reason, retry_allowed=retry_allowed)
                     self.store.put(key, record)
-                    if retry_allowed and len(record["attempts"]) < 2:
+                    if retry_allowed and len(record["attempts"]) < self.max_attempts:
                         if delay:
                             self.sleeper(delay)
                         continue
@@ -510,7 +513,7 @@ class JudgeClient:
                 self.store.settle(charge_id, actual, usage=attempt["usage"], cache_entries={key: record})
                 if record["status"] == "valid":
                     break
-            if record["status"] != "valid" and len(record["attempts"]) >= 2:
+            if record["status"] != "valid" and len(record["attempts"]) >= self.max_attempts:
                 record["retry_allowed"] = False
                 self.store.put(key, record)
             return {**record, "cache_hit": False}

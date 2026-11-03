@@ -38,7 +38,7 @@ class SearchService:
         self.embedder = None
         if mode == "grounded-local":
             from .grounded import GroundedSearch
-            self._grounded = GroundedSearch(self.config, release_id)
+            self._grounded = GroundedSearch(self.config, release_id, allow_api=allow_api)
             self.release_id = self._grounded.release_id
             self.mode = mode
             return

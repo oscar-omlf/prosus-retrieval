@@ -5,15 +5,17 @@ the query, scores all **4,997 distinct catalog items**, and returns the top `k`.
 Product vectors are prepared once. Search never calls a relevance judge.
 
 An experimental grounded method is explicitly selectable with
-`python -m prosus_search search "hambúrguer sem queijo para viagem" --mode grounded-local --json`.
+`python -m prosus_search search "hambúrguer sem queijo para viagem" --mode grounded-local --allow-api --json`.
 It retains E5-small, builds separate source-backed product text, retrieves dense
-and lexical candidates, and applies a small compatibility scorer. Its parser is
-catalog-derived and lexical; it does not resolve arbitrary semantic ambiguity.
+and lexical candidates, and applies a small compatibility scorer. Query-only
+semantic interpretation uses the budgeted gateway and persists validated plans;
+cached queries work offline without `--allow-api`. An uncached query fails clearly
+when API calls are disabled, rather than silently using a different parser.
 Historical customization records are kept separately and establish neither base
 ingredients nor current availability. The first construction encodes the catalog;
 later constructions validate and reuse that matrix. This mode does not change
 the incumbent or current-release pointer. Detailed results and limitations are
-recorded in `review/GROUNDED-SEARCH.md` after the development comparison.
+recorded in [the completed semantic evaluation](review/GROUNDED-SEMANTIC.md).
 
 **Working now:** offline multilingual E5, BM25 and their RRF combination;
 100 queries × five results × three local runs. The independent review implements
