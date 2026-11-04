@@ -4,10 +4,11 @@ This project matches Portuguese search queries to products in the supplied food
 catalog and returns five ranked offers. I combine local E5 embeddings, BM25
 keyword search, ingredient constraints and GPT-4.1-mini reranking.
 
-**I selected contextual reranking because it achieved the highest nDCG@5 among
-the four methods in my final comparison: 0.787 on 30 development queries and
-0.799 on 12 held-out queries.** The implementation also provides a fast local
-version for applications that prioritize latency and operating cost.
+**Contextual reranking achieved the highest nDCG@5 across 26 configurations on
+all 100 supplied queries: 0.675, with a useful result in the top five for 86
+queries and a useful first result for 73.** I evaluated 4,444 distinct
+query-product pairs under one shared policy. The implementation also provides a
+fast local version for applications that prioritize latency and operating cost.
 
 ## Search pipeline
 
@@ -110,11 +111,13 @@ prefixes, masked mean pooling and L2 normalization. I rank vectors by cosine
 similarity, calculated as a dot product after normalization.
 
 E5-small provides Portuguese semantic retrieval, a compact local index and zero
-embedding API cost per query. It outperformed the tested MiniLM encoder.
-E5-base increased development nDCG from 0.508 to 0.564, while both models achieved
-Success@5 of 10/30; I retained E5-small for its smaller runtime footprint and the
-paired comparison reported below. Hosted embedding experiments encountered access
-failures, so they produced no equivalent comparison.
+embedding API cost per query. On the common 100-query evaluation, the submitted
+semantic baseline scored 0.429 nDCG, E5-base scored 0.424, E5-large INT8 scored
+0.444, and full-text MiniLM scored 0.257. I retained E5-small and invested in
+contextual reranking, which raised the final pipeline to 0.675. The larger encoder
+was tested as a retriever, not as a replacement inside the final pipeline; that
+combination remains an experiment. Hosted embedding experiments encountered
+access failures, so they produced no equivalent comparison.
 
 ### Separate relevance ranking from explicit constraints
 
@@ -125,7 +128,8 @@ lets me distinguish an explicit contradiction from missing product information.
 
 ### GPT-4.1-mini for reranking
 
-GPT-4.1-mini achieved the highest nDCG and Success@5 in the final held-out sample.
+GPT-4.1-mini contextual reranking achieved the highest nDCG and Success@5 in the
+100-query comparison.
 I selected it for the submitted contextual pipeline and retained the local
 constraint-aware ranking as the low-latency alternative. Limiting model input to
 24 products and caching validated responses controls recurring API cost.
@@ -137,94 +141,196 @@ caches and cumulative API accounting. This keeps deployment to one application
 without a separate vector database. I deferred images, behavioral ranking and
 fine-tuning to focus the budget on text retrieval and measured ranking changes.
 
-## Experimental development
+## Experiments and results
 
-I tested changes in stages to identify whether errors came from product
-representation, the encoder, query interpretation, constraints or final ordering.
-Within each experiment, competing methods shared the same judged product pool.
-The table records the motivation, result and decision for each major experiment.
+I tested 26 recoverable configurations on **all 100 assignment queries**. I froze
+rankings and parameters before judging, pooled their top-five outputs, and graded
+all **4,444 distinct query-product pairs**. This gives every method the same
+relevance policy and judged pool across **13,000 returned positions**. I did not
+tune methods against these new scores.
 
-Each row reports its own comparison. Expanding a judged pool changes the ideal
-ranking used by nDCG; evaluation-policy versions also differ between stages.
+### What the experiments taught me
 
-| Experiment and motivation | Result | Decision |
+| Question | Evidence from the 100-query comparison | Design decision |
 | --- | --- | --- |
-| Remove metadata to test whether it distracts from product identity. | Full E5 text: 0.518 nDCG; no taxonomy: 0.458; name/description only: 0.391. | Retain metadata in the original baseline. Build the later constraint-aware representation from explicit product claims. |
-| Compare keyword search and a smaller multilingual encoder with E5. | Best tested BM25 variant: 0.499; MiniLM full text: 0.337; E5: 0.518. | Keep E5 and use BM25 in candidate generation. |
-| Combine lexical and dense rankings to improve exact and semantic matching. | Dense-dominant fusion: 0.522 versus E5: 0.518; gain 95% interval [-0.070, +0.070]. | Use fusion as a candidate source; retain E5 as the encoder. |
-| Increase encoder capacity with E5-base. | E5-base: 0.564 versus E5-small: 0.508; both succeed on 10/30 queries; gain interval [-0.041, +0.159]. | Retain the smaller encoder. E5-large INT8 completed inference but did not complete relevance evaluation. |
-| Test a local cross-encoder for improved ordering. | Dense/union reranking: 0.504 / 0.490 versus E5: 0.500; reranker-only p95 latency: 2.2-2.5 seconds. | Reject this configuration on the measured quality/latency trade-off. |
-| Add semantic query interpretation and product-attribute matching. | Grounded retrieval: 0.844 versus 0.592; Success: 9/30 versus 7/30. Hard-attribute contradictions increased. | Retain semantic interpretation and implement a separate exclusion filter. |
-| Add structured product facets to the grounded method. | Selected facet version: 0.737 versus grounded control: 0.727; both succeed on 9/30 queries. | Continue with explicit constraints rather than expanding facet rules alone. |
-| Test exclusion handling on 30 fresh synthetic queries. | Constraint-hybrid: 0.778; grounded: 0.702; E5: 0.669. Success: 20/30 versus 17/30 for each alternative. | Retain constraint-aware retrieval and use it as the control for contextual reranking. |
+| Does product representation matter? | The E5-small full-text baseline scored 0.429 nDCG, versus 0.307 without taxonomy and 0.197 with name/description only. | Retain useful product metadata. Preserve ingredient evidence separately for constraints. |
+| Should I use a larger encoder? | The submitted E5-small baseline scored 0.429; E5-base scored 0.424; E5-large INT8 scored 0.444; MiniLM full text scored 0.257. | Retain the compact local encoder. Contextual reranking delivers the larger observed improvement. |
+| Do keywords complement semantic retrieval? | BM25 scored 0.424; the original hybrid scored 0.461; lean hybrid scored 0.457. | Keep both signals for candidate generation. These full-system comparisons motivate the combination; a branch ablation would isolate each candidate source's contribution. |
+| Does structured interpretation help? | Grounded retrieval scored 0.517. The two facet variants scored 0.449 and 0.437. | Retain query interpretation; additional facet rules alone did not improve the grounded method. |
+| Can a local cross-encoder replace contextual reasoning? | The two tested cross-encoder configurations scored 0.404 and 0.385. Contextual reranking scored 0.675. | Select contextual reranking. Keep local ranking as the faster alternative. |
+| Do explicit constraints still need a separate mechanism? | The supplied 100 queries contain no explicit ingredient exclusions. Separate diagnostics cover negation, ingredient hierarchy, optional additions and unspecified ingredients. | Enforce supported contradictions directly and retain unknown ingredient status as eligible. Evaluate exclusion behavior separately from this relevance benchmark. |
 
-Field-separated fusion and query-prefix variants produced rankings with incomplete
-judgment coverage. An earlier source-cited LLM reranker completed 5/30 queries
-before an API rejection. I excluded these unfinished comparisons from method
-selection.
+### Complete comparison
 
-### Final comparison and selected method
+The table is sorted by nDCG@5. Method names identify the frozen configurations;
+variants change representation, encoder, lexical preprocessing, fusion or ranking.
+The submitted `semantic-local`, `lexical`, `hybrid-local`, `constraint-hybrid` and
+`contextual` modes are directly accessible through the application.
 
-I compared four architectures on 30 development queries using a shared pool of
-390 query-product pairs. I then froze the methods and evaluated 12 independently
-model-authored queries using a shared 152-pair pool. The query author received no
-catalog, previous queries or rankings.
-
-| Method | Development nDCG@5 | Held-out nDCG@5 | Held-out Success@5 | Held-out MRR@5 | Held-out mandatory conflicts |
+| Configuration | nDCG@5 | Success@5 | Precision@5 | MRR@5 | Mandatory conflicts |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Keyword ranking | 0.434 | 0.646 | 9/12 | 0.646 | 9/60 |
-| Simple hybrid | 0.530 | 0.706 | 9/12 | 0.750 | 10/60 |
-| Constraint-aware ranking | 0.654 | 0.774 | 10/12 | **0.833** | **2/60** |
-| Contextual reranking | **0.787** | **0.799** | **11/12** | 0.819 | 4/60 |
+| **contextual** | **0.675** | **86/100** | **55.0%** | **0.780** | **99/500** |
+| grounded-local | 0.517 | 79/100 | 40.8% | 0.629 | 135/500 |
+| hybrid-local | 0.461 | 75/100 | 36.6% | 0.565 | 171/500 |
+| lean-hybrid | 0.457 | 80/100 | 37.2% | 0.599 | 175/500 |
+| rrf-pt-0.25 | 0.449 | 77/100 | 38.4% | 0.561 | 164/500 |
+| grounded-facets | 0.449 | 76/100 | 36.0% | 0.603 | 167/500 |
+| constraint-hybrid | 0.447 | 77/100 | 37.0% | 0.575 | 168/500 |
+| small-fields-rrf-0.25 | 0.446 | 77/100 | 36.6% | 0.573 | 171/500 |
+| e5-large-int8-full | 0.444 | 77/100 | 38.0% | 0.633 | 175/500 |
+| base-pt-rrf-0.25 | 0.439 | 74/100 | 37.6% | 0.570 | 179/500 |
+| grounded-facets-v1 | 0.437 | 77/100 | 35.4% | 0.604 | 170/500 |
+| rrf-pt-1 | 0.434 | 81/100 | 35.6% | 0.556 | 182/500 |
+| semantic-local | 0.429 | 76/100 | 35.4% | 0.522 | 172/500 |
+| lexical | 0.424 | 73/100 | 32.0% | 0.569 | 207/500 |
+| e5-base-full | 0.424 | 69/100 | 35.4% | 0.556 | 184/500 |
+| query-prefix-rrf-small | 0.422 | 73/100 | 35.8% | 0.515 | 176/500 |
+| reranker-union20 | 0.404 | 76/100 | 32.4% | 0.542 | 205/500 |
+| field-lexical | 0.401 | 73/100 | 30.4% | 0.556 | 214/500 |
+| reranker-e5-top40 | 0.385 | 68/100 | 30.4% | 0.490 | 202/500 |
+| lexical-name-description | 0.369 | 64/100 | 28.4% | 0.471 | 229/500 |
+| lexical-fields-3-1 | 0.349 | 61/100 | 25.0% | 0.487 | 250/500 |
+| lexical-pt | 0.338 | 66/100 | 26.4% | 0.464 | 245/500 |
+| e5-no-taxonomy | 0.307 | 66/100 | 25.2% | 0.457 | 231/500 |
+| minilm-full | 0.257 | 52/100 | 19.8% | 0.367 | 270/500 |
+| e5-name-description | 0.197 | 47/100 | 15.4% | 0.273 | 300/500 |
+| minilm-name-description | 0.194 | 43/100 | 15.4% | 0.277 | 297/500 |
 
-**I selected contextual reranking for its leading nDCG on both samples and its
-11/12 held-out Success@5.** The local constraint-aware method offers a faster
-operating point and recorded fewer mandatory conflicts on the held-out sample.
+**I selected contextual reranking:** it leads all four ranking-quality measures,
+returns a useful first result for **73/100 queries**, and records the fewest judged
+mandatory conflicts. Its nDCG gain over grounded-local is **+0.158**, with a 95%
+intent-group bootstrap interval of **[+0.098, +0.213]**. The gain over the submitted
+semantic baseline is **+0.246 [+0.176, +0.317]**. I used 2,000 bootstrap replicates
+across 64 intent groups. These intervals measure query variation conditional on
+the automated labels and are unadjusted for multiple comparisons.
 
-The paired nDCG gain over the local control was +0.133 on development data, with
-95% interval [+0.029, +0.257], and +0.024 on held-out data, with interval
-[-0.095, +0.165]. These intervals describe query variation conditional on the
-model judgments. The 12-query sample provides an initial check of generalization.
+The 26 configurations include completed historical variants as well as the
+submitted modes. I excluded an incomplete gateway reranker, unfinished hosted
+embedding comparisons and a discarded facet-v3 implementation that I could not
+faithfully reproduce. Historical grounded variants reuse their original cached
+interpretations for the 30 development queries and existing production
+interpretations for the remaining 70. These compare configurations as recovered,
+rather than isolating a single changed component.
 
-Local control top-100 generation measured **26.5 ms median with cached query plans
-and embeddings**. Thirty first API ranking requests added **1.6 seconds median**
-and approximately **$0.0016 per ranking request**. These component timings exclude
-a complete uncached interpretation path.
+### Development and evaluation scope
+
+There is no model training in this project. Development still changes prompts,
+representations, candidate selection and ranking rules, so I reserved queries to
+check those choices. The full 100-query result summarizes the supplied assignment
+set; it includes 30 queries previously used for development. I also report the
+original remaining 70 separately under the same new pool and policy.
+
+| Method | Development 30 nDCG / Success | Remaining 70 nDCG / Success |
+| --- | ---: | ---: |
+| Contextual reranking | **0.734 / 24/30** | **0.650 / 62/70** |
+| Grounded retrieval | 0.604 / 22/30 | 0.481 / 57/70 |
+| Constraint-aware ranking | 0.498 / 22/30 | 0.426 / 55/70 |
+| Semantic baseline | 0.421 / 20/30 | 0.432 / 56/70 |
+
+I did not tune later methods against the original 70-query final evaluation. Those
+queries had appeared in earlier evaluations, so this re-evaluation is not a newly
+collected holdout.
+
+### Earlier independently authored query study
+
+Before the full comparison, I tested four architectures on 30 development queries
+and 12 independently model-authored queries. The author received no catalog,
+previous queries or rankings. The pools contained 390 and 152 pairs respectively.
+I preserve this study separately because its pools and judging policy differ
+from the 100-query benchmark; scores cannot be compared across those studies.
+
+| Method | Development nDCG@5 | Held-out nDCG@5 | Held-out Success@5 |
+| --- | ---: | ---: | ---: |
+| Keyword ranking | 0.434 | 0.646 | 9/12 |
+| Simple hybrid | 0.530 | 0.706 | 9/12 |
+| Constraint-aware ranking | 0.654 | 0.774 | 10/12 |
+| Contextual reranking | **0.787** | **0.799** | **11/12** |
+
+An earlier 30-query synthetic constraint study scored constraint-hybrid at
+**0.778 nDCG and 20/30 Success**, versus grounded retrieval at **0.702 and 17/30**
+and the semantic baseline at **0.669 and 17/30**. That study supported retaining
+explicit constraints. Its separate query set, pool and policy also remain
+associated with those results.
 
 ## Evaluation methodology
 
-The assignment supplies no relevance labels. I pooled the top-five results from
-competing methods and used blinded model judgments grounded in product fields.
-The grader assigned a score from 0 to 3: irrelevant or contradictory, partial,
-useful, or complete. An otherwise relevant product with an unspecified excluded
-ingredient can receive grade 2; an explicit contradiction requires grade 0.
+### Define relevance without supplied labels
 
-I report four measures:
+I use a 0-3 rubric: **0** means irrelevant or contradictory, **1** partial,
+**2** useful, and **3** complete. I first freeze query-only intent cards that
+separate identity, required attributes, exclusions, preferences and ambiguity.
+The card author sees no products. The product judge receives those cards and
+actual listing fields, with opaque IDs and no method names, ranking positions,
+retrieval scores or behavioral profiles. It cites source fields and text spans.
+
+I assess identity, positive requirements, exclusions and preferences separately.
+Deterministic checks only lower the model's raw grade: mandatory contradictions
+become 0; unknown identity or positive requirements cap the grade at 1; unknown
+exclusions, incomplete preferences or ambiguity cap it at 2. An unspecified
+excluded ingredient remains eligible. Historical customizations do not establish
+current availability, and false dietary flags do not prove ingredient inclusion.
+
+### Judge a common pool of actual outputs
+
+GPT-4.1-mini graded all 4,444 unique pairs in the combined top-five pool under the
+`all100-source-relevance-v1` protocol. I used new annotations throughout and
+preserved historical labels and metrics. Accepted
+annotations remained fixed when I corrected response-format and citation-schema
+errors during execution; the relevance rules did not change.
 
 | Metric | Interpretation |
 | --- | --- |
-| nDCG@5 | Quality of graded ordering against the best ranking in the judged pool. |
+| nDCG@5 | Graded ordering quality against the ideal ranking in the shared judged pool, using gains of `2^grade - 1` and logarithmic rank discounts. |
 | Success@5 | Fraction of queries with at least one useful result, graded 2 or 3. |
-| MRR@5 | Reciprocal rank of the first useful result, averaged across queries; queries with no useful top-five result contribute zero. |
-| Mandatory conflicts | Returned positions with a judged identity or attribute contradiction. |
+| Precision@5 | Fraction of the five returned products graded useful. |
+| MRR@5 | Reciprocal rank of the first useful result, averaged across queries; no useful result contributes zero. |
+| Mandatory conflicts | Returned positions with a judged identity or required-attribute contradiction, counted once per position. |
 
-GPT-4.1 judged the held-out products independently of the GPT-4.1-mini reranker.
-Preselected model checks agreed on usefulness for 10/12 development pairs and
-5/6 held-out pairs. All relevance labels are model-generated. One held-out
-exclusion judgment remained disputed in the source audit.
+One query has no positive grade anywhere in the pool. I exclude it from nDCG,
+which therefore averages **99 queries**; Success, Precision and MRR include all
+**100**. Pooling the top five supports fair comparison of returned rankings. It
+does not measure recall against every relevant item in the 4,997-offer catalog.
 
-I calculate nDCG for the 29 development and 11 held-out queries whose pools have
-positive ideal gain. Success and MRR include all queries. Product pools are
-shallow and queries are synthetic, so the results measure performance on these
-samples rather than full-catalog recall or live shopper behavior.
+The supplied queries contain **no explicit ingredient exclusions**. Mandatory
+conflicts in this table therefore measure identity and positive requirements,
+not dietary-exclusion error rates. I test exclusions separately with diagnostic
+cases for ingredient hierarchy, negation, optional ingredients, included sides,
+ambiguity, unspecified status and candidate replenishment. A passing diagnostic
+suite and a relevance benchmark answer different questions.
 
-I versioned changes to the judging policy and preserved earlier labels.
-Historical development judgments applied stricter rules to unknown requirements.
-The latest held-out query-card policy also permits open discovery without forcing
-a mandatory product identity; I amended it after a query-only pilot, before
-product judging. I kept rankings fixed. I did not reuse the original 70-query
-final evaluation for tuning later methods. Historical judgments and replay
-artifacts remain archived privately; this repository includes their summaries.
+### Check the automated judge
+
+GPT-4.1 independently reviewed **100 pairs, one per query**. The first 40 pairs
+were selected before primary judging. After observing disagreement, I froze a
+plan to expand the audit to 100; the additional selection used query/pair hashes,
+without grades, ranks or method identities. I kept the primary annotations fixed.
+
+The two models agreed on usefulness for **79/100 pairs** and on the exact grade
+for **56/100**. Replacing all 100 audited annotations with the independent reviews
+still places contextual reranking first: **0.667 nDCG versus 0.515** for
+grounded-local. All judgments are automated. The primary judge and contextual
+reranker both use GPT-4.1-mini, so shared-model bias remains a material limitation;
+the separate GPT-4.1 audit tests the ranking decision's sensitivity to disagreement.
+
+In the earlier 12-query study, GPT-4.1 was the primary judge; smaller independent
+checks agreed on usefulness for 10/12 development and 5/6 held-out pairs. I keep
+those checks associated with their original study rather than combining them
+with the new audit. Historical artifacts remain archived privately; this source
+repository includes their summaries.
+
+### Latency and cost
+
+Earlier component measurements recorded **26.5 ms median** for local top-100
+candidate generation with cached query plans and embeddings. Thirty first API
+ranking requests added **1.6 seconds median** and approximately **$0.0016 per
+ranking request**. These exclude a complete uncached interpretation path. The
+100-query re-evaluation verified cached serving outputs; it did not remeasure
+uncached end-to-end latency or operating cost for every configuration.
+
+The full re-evaluation and independent audit added **$1.153763** in API charges.
+Cumulative accounting is **$3.777124**, including prior uncertain reservations,
+within the **$4.50 ceiling**. All 710 new operations are accounted for, with no new
+pending or uncertain charges. This excludes local compute and assistant usage.
 
 ## Dataset and operating limits
 
@@ -290,9 +396,9 @@ ranks, scores, mode and release ID. Use `--overwrite` to replace an existing fil
 both interpretation and ranking calls. I cache validated results by inputs and
 policy. Calls use the official OpenAI endpoint and reserve against a persistent
 **$4.50 cumulative ceiling**. Preserve the ledger when reusing local state.
-Development and validation accounted for **$2.623361**, including uncertain
-reservations. This ledger tracks API use, excluding local compute and assistant
-usage.
+Development, re-evaluation and validation accounted for **$3.777124**, including
+prior uncertain reservations. This ledger tracks API use, excluding local compute
+and assistant usage.
 
 ## Source organization and verification
 
@@ -315,7 +421,14 @@ pyproject.toml                   # package and pinned direct dependencies
 requirements-lock.txt            # tested environment
 ```
 
-I verified the cleaned application with 135 core regressions, a complete index
-build and exact replay of all 500 previously exported result IDs. The next
-experiments would expand the untouched evaluation sample and ablate the three
-candidate rankings to measure their individual contribution.
+I verified the cleaned application with **135 core regressions** and **17
+evaluation tests**. The checks cover grading arithmetic, complete shared-pool
+coverage, source citations, grade caps and budget guards. I independently
+recomputed all 26 metric rows, revalidated all 4,544 primary/audit annotations,
+and reproduced identical report files on a second scoring run.
+
+The index build passed. HTTP replay matched **all 500 contextual result IDs across
+100 queries**, with API access disabled. Source and dataset hashes remained
+unchanged during re-evaluation. These checks establish reproducible cached
+serving. The next experiments would ablate candidate sources, measure shortlist
+coverage and run a full uncached latency benchmark.
