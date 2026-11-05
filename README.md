@@ -19,14 +19,14 @@ flowchart LR
     C --> D[Return the top five]
 ```
 
-I prepare the catalog once: validate records, remove exact duplicates, compute
-product embeddings, build keyword indexes and extract ingredient claims. Each
-search then follows four steps.
+Catalog preparation validates records, removes exact duplicates, computes product
+embeddings, builds keyword indexes and extracts ingredient claims. Each search
+then follows four steps.
 
 ### 1. Interpret the query
 
-I separate the requested product from required attributes, excluded ingredients
-and preferences. For **`hambúrguer sem queijo`**, the product is a burger and the
+The query interpreter separates the requested product from required attributes,
+excluded ingredients and preferences. For **`hambúrguer sem queijo`**, the product is a burger and the
 excluded ingredient is cheese. Occasion terms such as `para compartilhar` guide
 ranking without specifying an exact number of servings.
 
@@ -83,17 +83,17 @@ prepared lunch from a disposable plate even when both listings match the word
 
 ### 4. Validate and return results
 
-I validate that the selected IDs belong to the shortlist, contain no duplicates
-and pass the ingredient checks again. Scores 5 through 1 represent the final
-ordering. If fewer than five compatible offers exist, contextual mode returns
+Response validation checks that the selected IDs belong to the shortlist, contain
+no duplicates and pass the ingredient checks again. Scores 5 through 1 represent
+the final ordering. If fewer than five compatible offers exist, contextual mode returns
 an explicit error; the fast mode supports a shorter result list.
 
 ## Design decisions
 
 ### Retrieve first, then rerank
 
-I score all 4,997 products locally with inexpensive vector and keyword
-operations. I apply the language model only to the 24-product shortlist.
+The retriever scores all 4,997 products locally with inexpensive vector and
+keyword operations. The language model reranks only the 24-product shortlist.
 This concentrates model inference on plausible matches and bounds the amount of
 product text sent per request.
 
@@ -284,7 +284,7 @@ errors during execution; the relevance rules did not change.
 | Success@5 | Fraction of queries with at least one useful result, graded 2 or 3. |
 | Precision@5 | Fraction of the five returned products graded useful. |
 | MRR@5 | Reciprocal rank of the first useful result, averaged across queries; no useful result contributes zero. |
-| Mandatory conflicts | Returned positions with a judged identity or required-attribute contradiction, counted once per position. |
+| Mandatory conflicts | Returned positions with a judged identity or required-attribute contradiction, counted once per position. This is an evaluation measure, not a runtime filter count. |
 
 One query has no positive grade anywhere in the pool. I exclude it from nDCG,
 which therefore averages **99 queries**; Success, Precision and MRR include all
@@ -315,8 +315,7 @@ the separate GPT-4.1 audit tests the ranking decision's sensitivity to disagreem
 In the earlier 12-query study, GPT-4.1 was the primary judge; smaller independent
 checks agreed on usefulness for 10/12 development and 5/6 held-out pairs. I keep
 those checks associated with their original study rather than combining them
-with the new audit. Historical artifacts remain archived privately; this source
-repository includes their summaries.
+with the new audit.
 
 ### Latency and cost
 
@@ -327,12 +326,7 @@ ranking request**. These exclude a complete uncached interpretation path. The
 100-query re-evaluation verified cached serving outputs; it did not remeasure
 uncached end-to-end latency or operating cost for every configuration.
 
-The full re-evaluation and independent audit added **$1.153763** in API charges.
-Cumulative accounting is **$3.777124**, including prior uncertain reservations,
-within the **$4.50 ceiling**. All 710 new operations are accounted for, with no new
-pending or uncertain charges. This excludes local compute and assistant usage.
-
-## Dataset and operating limits
+## Dataset
 
 The supplied 5,000 rows contain three exact duplicate occurrences, leaving
 **4,997 offers from 1,806 merchants**. Only 1,707 carry a prepared-food category;
@@ -345,10 +339,10 @@ matcher recognizes supported expressions in names and descriptions; it cannot
 certify absence when a listing omits an ingredient. Reranking uses 600-character
 description excerpts and depends on retrieval supplying a relevant candidate.
 
-I validate model outputs before returning results. The last uncached novel-query
-probe failed query-provenance validation; the application stopped that request
-without retrying or substituting another service. Deployment work includes live
-merchant/location/stock eligibility, current option data, freshness and monitoring.
+The application validates model outputs before returning results. Uncached complex
+queries can fail query-provenance validation and return an explicit error.
+Production deployment requires live merchant, location and stock eligibility,
+current menu options, freshness checks and monitoring.
 
 ## Setup and usage
 
@@ -377,13 +371,18 @@ OPENAI_NEW_KEY=your_key_here
 ```powershell
 python scripts/main.py search "hamburguer sem queijo" --mode contextual --allow-api --json
 python scripts/main.py batch --mode contextual --allow-api --output outputs/results.csv
-python scripts/main.py serve --mode contextual --allow-api --port 8766
+python scripts/main.py serve --mode contextual --allow-api --port 8767
 python scripts/main.py budget
 ```
 
-The server binds to localhost and exposes `/health` and
-`/search?q=hamburguer%20sem%20queijo&k=5`. Batch output includes query/item IDs,
-ranks, scores, mode and release ID. Use `--overwrite` to replace an existing file.
+Open **http://127.0.0.1:8767/** after starting the server. The JSON API exposes
+`/health`, `/api/meta` and
+`/search?q=hamburguer%20sem%20queijo&k=5&mode=contextual`. Batch output includes
+query/item IDs, ranks, scores, mode and release ID. Use `--overwrite` to replace an existing file.
+
+Omit `--allow-api` for offline use. Contextual mode then requires cached
+responses; constraint-aware mode handles simple queries or cached interpretations
+without model calls. The first request may include model and index loading.
 
 | Mode | Purpose |
 | --- | --- |
@@ -393,14 +392,11 @@ ranks, scores, mode and release ID. Use `--overwrite` to replace an existing fil
 | `lexical`, `hybrid-local` | Original offline comparison methods. |
 
 `--allow-api` applies to contextual mode. Complex uncached queries may require
-both interpretation and ranking calls. I cache validated results by inputs and
-policy. Calls use the official OpenAI endpoint and reserve against a persistent
-**$4.50 cumulative ceiling**. Preserve the ledger when reusing local state.
-Development, re-evaluation and validation accounted for **$3.777124**, including
-prior uncertain reservations. This ledger tracks API use, excluding local compute
-and assistant usage.
+both interpretation and ranking calls. The application caches validated results
+by inputs and policy. Calls use the official OpenAI endpoint and reserve against
+a persistent **$4.50 cumulative ceiling**. Preserve the ledger when reusing local state.
 
-## Source organization and verification
+## Source organization
 
 ```text
 scripts/main.py                 # setup/build/search/batch/serve/budget
@@ -415,20 +411,13 @@ src/prosus_search/
   quality.py, model_client.py    # contextual reranking and API calls
   store.py                       # caches and cumulative accounting
   batch.py, server.py            # CSV export and localhost HTTP
+  web/                          # static application assets
   eligibility.py, snapshots.py   # eligibility and immutable state
 config.toml                     # paths, models, retrieval and budget
 pyproject.toml                   # package and pinned direct dependencies
 requirements-lock.txt            # tested environment
 ```
 
-I verified the cleaned application with **135 core regressions** and **17
-evaluation tests**. The checks cover grading arithmetic, complete shared-pool
-coverage, source citations, grade caps and budget guards. I independently
-recomputed all 26 metric rows, revalidated all 4,544 primary/audit annotations,
-and reproduced identical report files on a second scoring run.
-
-The index build passed. HTTP replay matched **all 500 contextual result IDs across
-100 queries**, with API access disabled. Source and dataset hashes remained
-unchanged during re-evaluation. These checks establish reproducible cached
-serving. The next experiments would ablate candidate sources, measure shortlist
-coverage and run a full uncached latency benchmark.
+Cached HTTP searches reproduced the evaluated rankings with API access disabled.
+The next experiments would ablate candidate sources, measure shortlist coverage
+and benchmark uncached end-to-end latency.
