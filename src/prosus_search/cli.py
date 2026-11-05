@@ -24,7 +24,7 @@ def parser(default_config='config.toml'):
     batch.add_argument('--queries', help='query CSV; defaults to the configured assignment input')
     batch.add_argument('--output', default='outputs/results.csv')
     batch.add_argument('--overwrite', action='store_true')
-    server = commands.add_parser('serve', help='serve localhost JSON search')
+    server = commands.add_parser('serve', help='serve the local search playground and JSON API')
     server.add_argument('--port', type=int, default=8766)
     for command in (query, batch, server):
         command.add_argument('--mode', choices=MODES, default='semantic-local')
@@ -39,9 +39,13 @@ def parser(default_config='config.toml'):
 def make_service(config, mode, allow_api=False):
     if allow_api and mode != 'contextual':
         raise ValueError('--allow-api is supported only for contextual mode')
-    if mode == 'contextual':
+    if mode in {'contextual', 'constraint-hybrid'}:
         from .quality import QualitySearch
-        return QualitySearch(config, allow_api=allow_api)
+        quality = QualitySearch(config, allow_api=allow_api if mode == 'contextual' else False)
+        # Share the exact evaluated control and its validated query-plan cache.
+        # Returning only the control keeps interpretation offline and never
+        # invokes the contextual reranker.
+        return quality if mode == 'contextual' else quality.control
     from .service import SearchService
     return SearchService(config, mode=mode, allow_api=False)
 
