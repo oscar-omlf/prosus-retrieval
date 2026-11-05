@@ -23,5 +23,8 @@ dependencies = [
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+prosus_search = ["web/*.html", "web/*.css", "web/*.js", "web/*.png"]
+
 [project.scripts]
 food-search = "prosus_search.cli:main"

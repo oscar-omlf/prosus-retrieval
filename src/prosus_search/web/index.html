@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Explore Portuguese food search with real catalog results and inspect the search pipeline.">
+  <title>Food Search Playground · Prosus assignment</title>
+  <link rel="icon" href="/assets/prosus-logo.png">
+  <link rel="stylesheet" href="/assets/app.css">
+  <script src="/assets/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#query">Skip to search</a>
+  <svg class="icon-library" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+    <symbol id="search-icon" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4.5 4.5"/></symbol>
+    <symbol id="arrow-icon" viewBox="0 0 24 24"><path d="M5 12h14m-6-6 6 6-6 6"/></symbol>
+    <symbol id="code-icon" viewBox="0 0 24 24"><path d="m8 6-6 6 6 6m8-12 6 6-6 6m-3-15-2 18"/></symbol>
+    <symbol id="plate-icon" viewBox="0 0 24 24"><circle cx="13" cy="12" r="7"/><circle cx="13" cy="12" r="4"/><path d="M2 2v7m3-7v7M2 7h3M3.5 9v13"/></symbol>
+  </svg>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="/" aria-label="Prosus food search home"><img src="/assets/prosus-logo.png" alt="Prosus" width="125" height="34"></a>
+      <span class="brand-divider"></span><span class="app-name">Food search <span>playground</span></span>
+      <div class="topbar-right"><span id="connection" class="connection"><i></i>Connecting</span><a href="/health" target="_blank" rel="noopener">API status <span aria-hidden="true">↗</span></a></div>
+    </div>
+  </header>
+  <main class="workspace">
+    <section class="search-workspace" aria-labelledby="page-title">
+      <div class="eyebrow"><span class="tiny-square"></span> SEMANTIC SEARCH / PT-BR</div>
+      <div class="hero-heading"><h1 id="page-title">Good food.<br><span>Better search.</span></h1><div class="catalog-stat"><strong id="catalog-count">—</strong><span>catalog offers<br>ready to explore</span></div></div>
+      <p class="intro">Ask naturally. Explore the matches. See how the system thinks.</p>
+      <form id="search-form" class="search-box" aria-label="Food search">
+        <label for="query" class="sr-only">Portuguese food query</label>
+        <div class="query-row"><svg class="icon" aria-hidden="true"><use href="#search-icon"/></svg><input id="query" name="q" type="search" lang="pt-BR" placeholder="O que você quer comer?" maxlength="2048" required autocomplete="off"><kbd aria-hidden="true">/</kbd><button id="search-button" type="submit"><span>Search</span><svg class="icon" aria-hidden="true"><use href="#arrow-icon"/></svg></button></div>
+        <div class="settings-row"><label for="mode">Search mode</label><select id="mode" name="mode" aria-describedby="mode-description" disabled><option>Loading modes…</option></select><span class="top-five">TOP 5 RESULTS</span></div>
+      </form>
+      <p id="mode-description" class="mode-description">Connecting to the local search service…</p>
+      <div id="examples" class="examples" aria-label="Example searches"></div>
+      <div id="error" class="error-box" role="alert" hidden><strong id="error-title">Search unavailable</strong><p id="error-message"></p><button id="retry" type="button">Try again</button></div>
+      <section id="results-section" aria-labelledby="results-title" aria-busy="false">
+        <div class="results-heading"><h2 id="results-title">Explore the catalog</h2><span id="result-summary">Your search starts here</span></div>
+        <div id="live-status" class="sr-only" role="status" aria-live="polite"></div>
+        <div id="results" class="result-grid">
+          <div class="empty-state"><div class="empty-art"><svg class="icon" aria-hidden="true"><use href="#plate-icon"/></svg><span class="spark one">+</span><span class="spark two">+</span></div><h3>A little craving. A lot to discover.</h3><p>Search in Portuguese, or try an example above.<br>Real products and ranking details will appear here.</p><span class="empty-footnote">Natural language in. Five matches out.</span></div>
+        </div>
+      </section>
+    </section>
+    <aside class="inspector" aria-label="Developer inspector">
+      <div class="inspector-heading"><svg class="icon" aria-hidden="true"><use href="#code-icon"/></svg><div><h2>Under the hood</h2><p>Inspect your last request</p></div><span class="live-dot" aria-hidden="true"></span></div>
+      <div class="inspector-body">
+        <div class="inspector-label">REQUEST DETAILS</div>
+        <dl class="request-stats"><div><dt>Mode</dt><dd id="stat-mode">—</dd></div><div><dt>Server search</dt><dd id="stat-server">—</dd></div><div><dt>Round trip</dt><dd id="stat-roundtrip">—</dd></div><div><dt>Reranker cache</dt><dd id="stat-cache">—</dd></div><div><dt>Candidates reranked</dt><dd id="stat-candidates">—</dd></div><div><dt>Model API</dt><dd id="stat-api">—</dd></div></dl>
+        <div class="release-box"><span>RELEASE ID</span><code id="release-id">Run a search to inspect its release.</code></div>
+        <details class="inspect-details" id="interpretation-details"><summary>Query interpretation</summary><pre id="interpretation-json">Not available until a search completes.</pre></details>
+        <details class="inspect-details"><summary>Request <span class="json-label">JSON</span></summary><div class="code-actions"><button type="button" data-copy="request-json" disabled>Copy</button></div><pre id="request-json">No request yet.</pre></details>
+        <details class="inspect-details"><summary>Response <span class="json-label">JSON</span></summary><div class="code-actions"><button type="button" data-copy="response-json" disabled>Copy</button></div><pre id="response-json">No response yet.</pre></details>
+        <p class="inspector-note">Scores order results within a mode. They are not relevance probabilities or comparable across modes.</p>
+        <div class="budget"><div><span>API ledger</span><strong id="budget-value">—</strong></div><meter id="budget-meter" min="0" max="4.5" value="0" aria-label="Cumulative API accounting"></meter><p id="api-note">Budget controls remain active on the server.</p></div>
+      </div>
+    </aside>
+    <footer class="footer"><span>Prosus assignment · Local research prototype</span><span>Catalog evidence, not live stock or availability.</span></footer>
+  </main>
+  <div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>
